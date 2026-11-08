@@ -11,7 +11,7 @@ _dl_is_gh() {
 
 dl_mirror_url() {
     local url="$1" prefix=""
-    prefix="${PX_GH_PROXY:-}"
+    prefix="${OC_GH_PROXY:-}"
     if [[ -z "$prefix" ]]; then
         prefix="$(db_get settings gh_proxy "")"
     fi
@@ -39,7 +39,7 @@ dl_fetch() {
     done
     if ((ok == 0)); then
         rm -f "$tmp"
-        px_err "下载失败：$url"
+        oc_err "下载失败：$url"
         return 1
     fi
     if [[ -n "$sha" ]]; then
@@ -47,7 +47,7 @@ dl_fetch() {
         got="$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')"
         if [[ "${got,,}" != "${sha,,}" ]]; then
             rm -f "$tmp"
-            px_err "SHA256 校验失败：$(basename "$out")"
+            oc_err "SHA256 校验失败：$(basename "$out")"
             return 1
         fi
     fi
@@ -59,7 +59,7 @@ dl_fetch() {
 dl_latest_tag() {
     local repo="$1" api tag prefix
     api="https://api.github.com/repos/$repo/releases/latest"
-    prefix="${PX_GH_PROXY:-$(db_get settings gh_proxy "")}"
+    prefix="${OC_GH_PROXY:-$(db_get settings gh_proxy "")}"
     tag="$(curl -fsSL --connect-timeout 10 --max-time 30 "$api" 2>/dev/null \
         | jq -r '.tag_name // empty' 2>/dev/null)"
     if [[ -z "$tag" && -n "$prefix" ]]; then
@@ -81,7 +81,7 @@ dl_gh() {
     local repo="$1" tag="$2" asset="$3" out="$4"
     if [[ "$tag" == "latest" ]]; then
         tag="$(dl_latest_tag "$repo")"
-        [[ -z "$tag" ]] && { px_err "无法获取 $repo 最新版本号（网络或 API 限流）"; return 1; }
+        [[ -z "$tag" ]] && { oc_err "无法获取 $repo 最新版本号（网络或 API 限流）"; return 1; }
     fi
     dl_fetch "https://github.com/$repo/releases/download/$tag/$asset" "$out"
 }

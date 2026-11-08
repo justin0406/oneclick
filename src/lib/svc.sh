@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # lib/svc.sh —— systemd 单后端封装
 
-svc_unit_path() { printf '%s/%s.service' "$PX_UNIT_DIR" "$1"; }
+svc_unit_path() { printf '%s/%s.service' "$OC_UNIT_DIR" "$1"; }
 
 # svc_create <unit> <ExecStart> <Description> [额外 Service 行...]
 svc_create() {

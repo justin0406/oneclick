@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# lib/store.sh —— 状态库 /etc/px/db.json（jq + flock，原子写）
+# lib/store.sh —— 状态库 /etc/oneclick/db.json（jq + flock，原子写）
 
 db_init() {
-    # 派生目录随 PX_ROOT 重算，便于测试时改根目录
-    PX_CERT_DIR="$PX_ROOT/certs"
-    PX_SUB_DIR="$PX_ROOT/sub"
-    mkdir -p "$PX_ROOT" "$PX_CERT_DIR" "$PX_SUB_DIR" "$PX_LOG_DIR"
-    chmod 700 "$PX_ROOT"
-    if [[ ! -f "$PX_DB" ]]; then
-        printf '{"installed":[],"settings":{}}\n' > "$PX_DB"
+    # 派生目录随 OC_ROOT 重算，便于测试时改根目录
+    OC_CERT_DIR="$OC_ROOT/certs"
+    OC_SUB_DIR="$OC_ROOT/sub"
+    mkdir -p "$OC_ROOT" "$OC_CERT_DIR" "$OC_SUB_DIR" 2>/dev/null || true
+    mkdir -p "$OC_LOG_DIR" 2>/dev/null || true
+    chmod 700 "$OC_ROOT" 2>/dev/null || true
+    if [[ ! -f "$OC_DB" ]]; then
+        printf '{"installed":[],"settings":{}}\n' > "$OC_DB"
     fi
-    chmod 600 "$PX_DB"
+    chmod 600 "$OC_DB" 2>/dev/null || true
 }
 
 # 内部：原子应用一个 jq 过滤器。$1=过滤器，其余为 jq 参数（--arg 等）
@@ -19,19 +20,19 @@ _db_apply() {
     db_init
     local lockfd="" tmp
     if command -v flock >/dev/null 2>&1; then
-        exec {lockfd}>"$PX_ROOT/.db.lock"
+        exec {lockfd}>"$OC_ROOT/.db.lock"
         flock "$lockfd"
     fi
-    tmp="$(mktemp "$PX_ROOT/.db.XXXXXX")" || { _db_unlock "$lockfd"; return 1; }
-    if jq "$@" "$filter" "$PX_DB" > "$tmp" 2>/dev/null; then
+    tmp="$(mktemp "$OC_ROOT/.db.XXXXXX")" || { _db_unlock "$lockfd"; return 1; }
+    if jq "$@" "$filter" "$OC_DB" > "$tmp" 2>/dev/null; then
         chmod 600 "$tmp"
-        mv -f "$tmp" "$PX_DB"
+        mv -f "$tmp" "$OC_DB"
         _db_unlock "$lockfd"
         return 0
     fi
     rm -f "$tmp"
     _db_unlock "$lockfd"
-    px_err "状态库写入失败（db.json 格式异常？）"
+    oc_err "状态库写入失败（db.json 格式异常？）"
     return 1
 }
 
@@ -44,9 +45,9 @@ _db_unlock() {
 
 db_get() {
     local sec="$1" key="$2" def="${3:-}" out
-    [[ -f "$PX_DB" ]] || { printf '%s' "$def"; return 0; }
+    [[ -f "$OC_DB" ]] || { printf '%s' "$def"; return 0; }
     out="$(jq -r --arg s "$sec" --arg k "$key" \
-        'if .[$s][$k] == null then empty else (.[$s][$k] | tostring) end' "$PX_DB" 2>/dev/null)"
+        'if .[$s][$k] == null then empty else (.[$s][$k] | tostring) end' "$OC_DB" 2>/dev/null)"
     printf '%s\n' "${out:-$def}"
 }
 
@@ -69,23 +70,23 @@ db_del() {
 
 db_has() {
     local sec="$1" key="${2:-}"
-    [[ -f "$PX_DB" ]] || return 1
+    [[ -f "$OC_DB" ]] || return 1
     if [[ -n "$key" ]]; then
-        [[ "$(jq -r --arg s "$sec" --arg k "$key" '.[$s][$k] != null' "$PX_DB" 2>/dev/null)" == "true" ]]
+        [[ "$(jq -r --arg s "$sec" --arg k "$key" '.[$s][$k] != null' "$OC_DB" 2>/dev/null)" == "true" ]]
     else
-        jq -e --arg s "$sec" 'has($s)' "$PX_DB" >/dev/null 2>&1
+        jq -e --arg s "$sec" 'has($s)' "$OC_DB" >/dev/null 2>&1
     fi
 }
 
 db_section_json() {
     local sec="$1"
-    [[ -f "$PX_DB" ]] || { printf '{}'; return 0; }
-    jq -c --arg s "$sec" '.[$s] // {}' "$PX_DB" 2>/dev/null || printf '{}'
+    [[ -f "$OC_DB" ]] || { printf '{}'; return 0; }
+    jq -c --arg s "$sec" '.[$s] // {}' "$OC_DB" 2>/dev/null || printf '{}'
 }
 
 db_is_installed() {
-    [[ -f "$PX_DB" ]] || return 1
-    [[ "$(jq -r --arg k "$1" '(.installed // []) | index($k) != null' "$PX_DB" 2>/dev/null)" == "true" ]]
+    [[ -f "$OC_DB" ]] || return 1
+    [[ "$(jq -r --arg k "$1" '(.installed // []) | index($k) != null' "$OC_DB" 2>/dev/null)" == "true" ]]
 }
 
 db_mark_installed() {

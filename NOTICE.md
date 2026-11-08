@@ -1,6 +1,6 @@
 # NOTICE
 
-This repository (`oneclick`, containing the **PX** installer) is a merged,
+This repository (`oneclick`, containing the **OneClick** installer) is a merged,
 single-file reimplementation of several community one-click proxy installers.
 It was written for personal / internal use, not as a redistributable product.
 

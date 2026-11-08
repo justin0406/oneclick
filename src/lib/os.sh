@@ -5,24 +5,24 @@ os_detect() {
     if [[ -f /etc/os-release ]]; then
         # shellcheck disable=SC1091
         . /etc/os-release
-        PX_OS_ID="${ID:-unknown}"
-        PX_OS_VER="${VERSION_ID:-unknown}"
+        OC_OS_ID="${ID:-unknown}"
+        OC_OS_VER="${VERSION_ID:-unknown}"
     elif [[ -f /etc/redhat-release ]]; then
-        PX_OS_ID="centos"; PX_OS_VER="unknown"
+        OC_OS_ID="centos"; OC_OS_VER="unknown"
     else
-        PX_OS_ID="unknown"; PX_OS_VER="unknown"
+        OC_OS_ID="unknown"; OC_OS_VER="unknown"
     fi
     case "$(uname -m)" in
-        x86_64|amd64)   PX_ARCH="amd64" ;;
-        aarch64|arm64)  PX_ARCH="arm64" ;;
-        armv7l|armv7*)  PX_ARCH="armv7l" ;;
-        i386|i686)      PX_ARCH="i386" ;;
-        *)              PX_ARCH="$(uname -m)" ;;
+        x86_64|amd64)   OC_ARCH="amd64" ;;
+        aarch64|arm64)  OC_ARCH="arm64" ;;
+        armv7l|armv7*)  OC_ARCH="armv7l" ;;
+        i386|i686)      OC_ARCH="i386" ;;
+        *)              OC_ARCH="$(uname -m)" ;;
     esac
 }
 
 os_family() {
-    case "$PX_OS_ID" in
+    case "$OC_OS_ID" in
         debian|ubuntu|armbian|raspbian|linuxmint|pop) printf 'debian' ;;
         centos|rhel|rocky|almalinux|fedora|ol)        printf 'rhel' ;;
         *)                                            printf 'unknown' ;;
@@ -44,25 +44,25 @@ os_pkg_install() {
         need+=("$p")
     done
     [[ ${#need[@]} -eq 0 ]] && return 0
-    px_info "安装系统依赖：${need[*]}"
+    oc_info "安装系统依赖：${need[*]}"
     case "$(os_family)" in
         debian)
             export DEBIAN_FRONTEND=noninteractive
-            apt-get update -qq >/dev/null 2>&1 || px_warn "apt-get update 失败，继续尝试安装"
+            apt-get update -qq >/dev/null 2>&1 || oc_warn "apt-get update 失败，继续尝试安装"
             if ! apt-get install -y -qq "${need[@]}" >/dev/null 2>&1; then
-                px_err "依赖安装失败：${need[*]}"
+                oc_err "依赖安装失败：${need[*]}"
                 return 1
             fi
             ;;
         rhel)
             if command -v dnf >/dev/null 2>&1; then
-                dnf install -y -q "${need[@]}" >/dev/null 2>&1 || { px_err "dnf 安装失败"; return 1; }
+                dnf install -y -q "${need[@]}" >/dev/null 2>&1 || { oc_err "dnf 安装失败"; return 1; }
             else
-                yum install -y -q "${need[@]}" >/dev/null 2>&1 || { px_err "yum 安装失败"; return 1; }
+                yum install -y -q "${need[@]}" >/dev/null 2>&1 || { oc_err "yum 安装失败"; return 1; }
             fi
             ;;
         *)
-            px_err "不支持的发行版：$PX_OS_ID，请手动安装：${need[*]}"
+            oc_err "不支持的发行版：$OC_OS_ID，请手动安装：${need[*]}"
             return 1
             ;;
     esac
@@ -78,7 +78,7 @@ os_dep_install() {
             qr)   want+=(qrencode) ;;
             cert) want+=(openssl) ;;
             acme) want+=(socat cron) ;;
-            *)    px_warn "未知依赖项：$f" ;;
+            *)    oc_warn "未知依赖项：$f" ;;
         esac
     done
     [ ${#want[@]} -eq 0 ] && return 0
@@ -111,13 +111,13 @@ os_uuid() {
 
 os_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
-px_require_root() {
-    [[ "${EUID:-$(id -u)}" -eq 0 ]] || px_die "请用 root 运行（sudo -i 后重试）"
+oc_require_root() {
+    [[ "${EUID:-$(id -u)}" -eq 0 ]] || oc_die "请用 root 运行（sudo -i 后重试）"
 }
 
-px_require_cmd() {
+oc_require_cmd() {
     local c
     for c in "$@"; do
-        command -v "$c" >/dev/null 2>&1 || px_die "缺少命令：$c"
+        command -v "$c" >/dev/null 2>&1 || oc_die "缺少命令：$c"
     done
 }

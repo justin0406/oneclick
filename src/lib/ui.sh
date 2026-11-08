@@ -8,26 +8,26 @@ else
     C_R=""; C_G=""; C_Y=""; C_B=""; C_C=""; C_M=""; C_BOLD=""; C_DIM=""; C_N=""
 fi
 
-px_info() { printf '%b[*]%b %s\n' "$C_C" "$C_N" "$*"; }
-px_ok()   { printf '%b[✓]%b %s\n' "$C_G" "$C_N" "$*"; }
-px_warn() { printf '%b[!]%b %s\n' "$C_Y" "$C_N" "$*" >&2; }
-px_err()  { printf '%b[✗]%b %s\n' "$C_R" "$C_N" "$*" >&2; }
-px_die()  { px_err "$1"; exit "${2:-1}"; }
+oc_info() { printf '%b[*]%b %s\n' "$C_C" "$C_N" "$*"; }
+oc_ok()   { printf '%b[✓]%b %s\n' "$C_G" "$C_N" "$*"; }
+oc_warn() { printf '%b[!]%b %s\n' "$C_Y" "$C_N" "$*" >&2; }
+oc_err()  { printf '%b[✗]%b %s\n' "$C_R" "$C_N" "$*" >&2; }
+oc_die()  { oc_err "$1"; exit "${2:-1}"; }
 
-px_hr() { printf '%b%s%b\n' "$C_DIM" "────────────────────────────────────────────────────────" "$C_N"; }
+oc_hr() { printf '%b%s%b\n' "$C_DIM" "────────────────────────────────────────────────────────" "$C_N"; }
 
-px_title() {
+oc_title() {
     printf '\n%b%s%b\n' "$C_BOLD$C_C" "== $* ==" "$C_N"
 }
 
-px_kv() {
+oc_kv() {
     printf '  %b%-24s%b %s\n' "$C_DIM" "$1" "$C_N" "$2"
 }
 
-# 确认：PX_YES=1 时直接按默认值返回
-px_confirm() {
+# 确认：OC_YES=1 时直接按默认值返回
+oc_confirm() {
     local prompt="$1" def="${2:-y}" ans
-    if [[ "$PX_YES" == "1" ]]; then
+    if [[ "$OC_YES" == "1" ]]; then
         [[ "$def" == "y" ]] && return 0 || return 1
     fi
     local hint="[Y/n]"
@@ -40,15 +40,15 @@ px_confirm() {
         case "${ans,,}" in
             y|yes|是) return 0 ;;
             n|no|否)  return 1 ;;
-            *) px_warn "请输入 y 或 n" ;;
+            *) oc_warn "请输入 y 或 n" ;;
         esac
     done
 }
 
 # 提问：stdout 输出答案（空则默认值）
-px_ask() {
+oc_ask() {
     local prompt="$1" def="${2:-}" ans
-    if [[ "$PX_YES" == "1" && -n "$def" ]]; then
+    if [[ "$OC_YES" == "1" && -n "$def" ]]; then
         printf '%s' "$def"
         return 0
     fi
@@ -62,7 +62,7 @@ px_ask() {
 }
 
 # 不回显提问
-px_ask_secret() {
+oc_ask_secret() {
     local prompt="$1" ans
     printf '%b%s%b: ' "$C_Y" "$prompt" "$C_N" >&2
     read -rs ans || ans=""
@@ -71,7 +71,7 @@ px_ask_secret() {
 }
 
 # 菜单：stdout 输出编号（0 = 返回）
-px_menu() {
+oc_menu() {
     local title="$1"; shift
     local -a items=("$@")
     local i sel
@@ -88,12 +88,12 @@ px_menu() {
             printf '%s' "$sel"
             return 0
         fi
-        px_warn "输入无效，请重新选择"
+        oc_warn "输入无效，请重新选择"
     done
 }
 
-px_pause() {
-    [[ "$PX_YES" == "1" ]] && return 0
+oc_pause() {
+    [[ "$OC_YES" == "1" ]] && return 0
     printf '%b按回车继续...%b' "$C_DIM" "$C_N"
     read -r _ || true
 }

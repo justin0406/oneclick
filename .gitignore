@@ -12,3 +12,7 @@ research/
 *.log
 *.tmp
 .DS_Store
+
+# 内部设计与计划文档（不随仓库发布）
+PLAN.md
+SPEC.md

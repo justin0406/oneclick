@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# build.sh —— 把 src/ 拼成单文件 dist/px.sh，并做静态校验
+# build.sh —— 把 src/ 拼成单文件 dist/oneclick.sh，并做静态校验
 set -uo pipefail
 cd "$(dirname "$0")" || exit 1
 
 SRC="src"
-OUT="dist/px.sh"
+OUT="dist/oneclick.sh"
 
 FILES=(
     00-header.sh
@@ -76,7 +76,7 @@ defined="$(grep -oE '^[[:space:]]*[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*\(\)' "$OUT"
 # 只扫描"命令位"（行首/管道/&&/||/子shell/控制关键字之后）的 token，
 # 避免把 jq 字段字面量（cert_mode、cert_path 之类）误判成函数名
 called="$(perl -ne '
-    while (/(?:^|[;&|({]|\$\(|&&|\|\|)\s*(?:(?:if|then|elif|else|do|while|until|!)\s+)?((?:px|proto|db|dl|os|net|cert|svc|share|pxp)_[A-Za-z0-9_]+)/g) {
+    while (/(?:^|[;&|({]|\$\(|&&|\|\|)\s*(?:(?:if|then|elif|else|do|while|until|!)\s+)?((?:oc|ocp|proto|db|dl|os|net|cert|svc|share)_[A-Za-z0-9_]+)/g) {
         print "$1\n";
     }
 ' "$OUT" | sort -u)"
@@ -101,7 +101,7 @@ echo "✓ 重复定义：0"
 echo "== 4/4 产物 =="
 lines=$(wc -l < "$OUT" | tr -d ' ')
 size=$(wc -c < "$OUT" | tr -d ' ')
-sha=$(sha256sum "$OUT" | awk '{print $1}')
+sha=$( (sha256sum "$OUT" 2>/dev/null || shasum -a 256 "$OUT") | awk "{print \$1}" )
 echo "✓ $OUT"
 echo "  行数: $lines  字节: $size"
 echo "  sha256: $sha"

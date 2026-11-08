@@ -1,8 +1,8 @@
 # lib/net.sh —— 公网 IP / 端口占用 / 防火墙四后端 / BBR+TFO / UDP 端口跳跃
 #
 # 防火墙纪律（SPEC §6）：只增删本脚本自己的规则，绝不清表、绝不碰别人的规则。
-#   * nft      —— 独立 table `inet px`，每条规则带 comment "px-*"
-#   * iptables —— `-m comment --comment "px-*"`，删除前先 -C 确认存在
+#   * nft      —— 独立 table `inet oneclick`，每条规则带 comment "oneclick-*"
+#   * iptables —— `-m comment --comment "oneclick-*"`，删除前先 -C 确认存在
 #   * firewalld/ufw —— 按端口精确增删；ufw 额外写 comment 便于回收
 # 探测顺序按契约：nft -> firewalld -> ufw -> iptables。
 
@@ -38,7 +38,7 @@ _net_port_num() {
 net_primary_ip() {
     local ip url
     if ! command -v curl >/dev/null 2>&1; then
-        px_warn "缺少 curl，无法探测公网 IP"
+        oc_warn "缺少 curl，无法探测公网 IP"
         return 0
     fi
     for url in https://ip.sb https://ifconfig.me https://api.ipify.org https://4.ipw.cn; do
@@ -158,16 +158,16 @@ net_fw_backend() {
 }
 
 # ===========================================================================
-# 防火墙：nft 后端（独立 table inet px）
+# 防火墙：nft 后端（独立 table inet oneclick）
 # ===========================================================================
 
 _net_nft_ready() {
     command -v nft >/dev/null 2>&1 || return 1
-    if ! nft list table inet px >/dev/null 2>&1; then
-        nft add table inet px 2>/dev/null || return 1
+    if ! nft list table inet oneclick >/dev/null 2>&1; then
+        nft add table inet oneclick 2>/dev/null || return 1
     fi
-    if ! nft list chain inet px input >/dev/null 2>&1; then
-        nft add chain inet px input '{ type filter hook input priority 0 ; policy accept ; }' 2>/dev/null || return 1
+    if ! nft list chain inet oneclick input >/dev/null 2>&1; then
+        nft add chain inet oneclick input '{ type filter hook input priority 0 ; policy accept ; }' 2>/dev/null || return 1
     fi
     return 0
 }
@@ -176,14 +176,14 @@ _net_nft_ready() {
 # 由调用方回退到 iptables nat，不在这里硬失败。
 _net_nft_prerouting_ready() {
     _net_nft_ready || return 1
-    if ! nft list chain inet px prerouting >/dev/null 2>&1; then
-        nft add chain inet px prerouting '{ type nat hook prerouting priority -100 ; policy accept ; }' 2>/dev/null || return 1
+    if ! nft list chain inet oneclick prerouting >/dev/null 2>&1; then
+        nft add chain inet oneclick prerouting '{ type nat hook prerouting priority -100 ; policy accept ; }' 2>/dev/null || return 1
     fi
     return 0
 }
 
 _net_nft_list() {
-    nft -a list chain inet px "$1" 2>/dev/null
+    nft -a list chain inet oneclick "$1" 2>/dev/null
 }
 
 # 规则里是否已存在同 proto/port/tag 的规则（避免重复叠加）
@@ -194,13 +194,13 @@ _net_nft_has_rule() {
         END { exit !f }'
 }
 
-# 把规则文本"proto dport <port>"里命中的 px- 规则 handle 打出来
+# 把规则文本"proto dport <port>"里命中的 oneclick- 规则 handle 打出来
 _net_nft_handles_for_port() {
     local chain="$1" proto="$2" port="$3" tag="${4:-}"
     _net_nft_list "$chain" | awk -v proto="$proto" -v port="$port" -v tag="$tag" '
         {
             if ($0 !~ /# handle [0-9]+$/) next
-            if (index($0, "comment \"px-") == 0) next
+            if (index($0, "comment \"oneclick-") == 0) next
             if (index($0, proto " dport " port " ") == 0) next
             if (tag != "" && index($0, "comment \"" tag "\"") == 0) next
             print $NF
@@ -219,32 +219,32 @@ _net_nft_del_handles() {
     shift
     for h in "$@"; do
         [[ "$h" =~ ^[0-9]+$ ]] || continue
-        nft delete rule inet px "$chain" handle "$h" 2>/dev/null || true
+        nft delete rule inet oneclick "$chain" handle "$h" 2>/dev/null || true
     done
 }
 
-# 让 table inet px 在重启后自动恢复：dump 到 /etc/px，再挂一个 oneshot unit。
+# 让 table inet oneclick 在重启后自动恢复：dump 到 /etc/oneclick，再挂一个 oneshot unit。
 # （nft 规则不写盘重启即丢；不能去改系统的 /etc/nftables.conf，避免动别人的规则。）
 _net_nft_persist() {
-    local dump="$PX_ROOT/nft-px.nft" unit="px-firewall" unitfile
+    local dump="$OC_ROOT/nft-oneclick.nft" unit="oneclick-firewall" unitfile
     command -v nft >/dev/null 2>&1 || return 0
-    nft list table inet px >/dev/null 2>&1 || return 0
-    mkdir -p "$PX_ROOT" 2>/dev/null || return 0
-    nft list table inet px > "$dump" 2>/dev/null || return 0
+    nft list table inet oneclick >/dev/null 2>&1 || return 0
+    mkdir -p "$OC_ROOT" 2>/dev/null || return 0
+    nft list table inet oneclick > "$dump" 2>/dev/null || return 0
     chmod 600 "$dump" 2>/dev/null || true
     [[ -d /run/systemd/system ]] || return 0
-    unitfile="$PX_UNIT_DIR/$unit.service"
+    unitfile="$OC_UNIT_DIR/$unit.service"
     [[ -f "$unitfile" ]] && return 0
     cat > "$unitfile" <<EOF
 [Unit]
-Description=PX firewall restore (nftables table inet px)
+Description=OneClick firewall restore (nftables table inet oneclick)
 ConditionPathExists=$dump
 After=network-online.target nftables.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStartPre=-$(command -v nft) delete table inet px
+ExecStartPre=-$(command -v nft) delete table inet oneclick
 ExecStart=$(command -v nft) -f $dump
 RemainAfterExit=yes
 
@@ -253,7 +253,7 @@ WantedBy=multi-user.target
 EOF
     chmod 644 "$unitfile" 2>/dev/null || true
     os_service_reload
-    svc_enable "$unit" || px_warn "px-firewall 自启注册失败（重启后需重新放行端口）"
+    svc_enable "$unit" || oc_warn "oneclick-firewall 自启注册失败（重启后需重新放行端口）"
     return 0
 }
 
@@ -261,14 +261,14 @@ _net_nft_allow() {
     local port="$1" proto="$2" tag="$3"
     _net_nft_ready || return 1
     _net_nft_has_rule input "$proto" "$port" "$tag" && return 0
-    nft add rule inet px input "$proto" dport "$port" accept comment "\"$tag\"" 2>/dev/null || return 1
+    nft add rule inet oneclick input "$proto" dport "$port" accept comment "\"$tag\"" 2>/dev/null || return 1
     _net_nft_persist
     return 0
 }
 
 _net_nft_deny() {
     local port="$1" proto="$2" tag="${3:-}"
-    nft list chain inet px input >/dev/null 2>&1 || return 0
+    nft list chain inet oneclick input >/dev/null 2>&1 || return 0
     local -a hs=()
     mapfile -t hs < <(_net_nft_handles_for_port input "$proto" "$port" "$tag")
     [[ ${#hs[@]} -eq 0 ]] && return 0
@@ -278,7 +278,7 @@ _net_nft_deny() {
 }
 
 # ===========================================================================
-# 防火墙：iptables / ip6tables 后端（只动带 px- comment 的规则）
+# 防火墙：iptables / ip6tables 后端（只动带 oneclick- comment 的规则）
 # ===========================================================================
 
 _net_ipt_available() {
@@ -286,7 +286,7 @@ _net_ipt_available() {
     "$1" -S INPUT >/dev/null 2>&1
 }
 
-# 列出 INPUT 里命中 port/proto 且 comment 为 px-* 的 tag
+# 列出 INPUT 里命中 port/proto 且 comment 为 oneclick-* 的 tag
 _net_ipt_tags() {
     local cmd="$1" port="$2" proto="$3" tag="${4:-}"
     "$cmd" -S INPUT 2>/dev/null | awk -v proto="$proto" -v port="$port" -v tag="$tag" '
@@ -298,7 +298,7 @@ _net_ipt_tags() {
                 else if ($i == "--comment") { c = $(i + 1); gsub(/"/, "", c) }
             }
             if (p != proto || d != port) next
-            if (c !~ /^px-/) next
+            if (c !~ /^oneclick-/) next
             if (tag != "" && c != tag) next
             print c
         }'
@@ -415,18 +415,18 @@ _net_ufw_deny() {
         [[ -n "$line" ]] || continue
         c="$(printf '%s' "$line" | sed -n "s/.*comment '\([^']*\)'.*/\1/p")"
         if [[ -z "$c" ]]; then
-            c="$(printf '%s' "$line" | sed -n "s/.*'\(px-[^']*\)'.*/\1/p")"
+            c="$(printf '%s' "$line" | sed -n "s/.*'\(oneclick-[^']*\)'.*/\1/p")"
         fi
         if [[ -z "$c" ]]; then
-            c="$(printf '%s' "$line" | tr ' ' '\n' | grep -m1 '^px-')"
+            c="$(printf '%s' "$line" | tr ' ' '\n' | grep -m1 '^oneclick-')"
         fi
         [[ -n "$c" ]] || continue
-        [[ "$c" == px-* ]] || continue
+        [[ "$c" == oneclick-* ]] || continue
         if [[ -n "$tag" && "$c" != "$tag" ]]; then
             continue
         fi
         ufw --force delete allow "$port/$proto" comment "$c" >/dev/null 2>&1 \
-            || px_warn "未能删除 ufw 规则：${port}/${proto}（comment ${c}）"
+            || oc_warn "未能删除 ufw 规则：${port}/${proto}（comment ${c}）"
     done < <(ufw show added 2>/dev/null | grep -F "allow $port/$proto")
     return 0
 }
@@ -438,16 +438,16 @@ _net_ufw_deny() {
 # net_fw_allow <port> <tcp|udp> [comment]
 net_fw_allow() {
     local port proto tag backend rc=0
-    port="$(_net_port_num "${1:-}")" || { px_err "net_fw_allow: 端口非法：${1:-<空>}"; return 1; }
+    port="$(_net_port_num "${1:-}")" || { oc_err "net_fw_allow: 端口非法：${1:-<空>}"; return 1; }
     proto="${2:-tcp}"
     tag="${3:-}"
     case "$proto" in
         tcp|udp) ;;
-        *) px_err "net_fw_allow: 协议应为 tcp|udp：$proto"; return 1 ;;
+        *) oc_err "net_fw_allow: 协议应为 tcp|udp：$proto"; return 1 ;;
     esac
     if [[ -z "$tag" ]]; then
-        # 默认 px-<调用者>，只保留安全字符（iptables comment 上限 256）
-        tag="px-${FUNCNAME[1]:-user}"
+        # 默认 oneclick-<调用者>，只保留安全字符（iptables comment 上限 256）
+        tag="oneclick-${FUNCNAME[1]:-user}"
         tag="${tag//[^A-Za-z0-9_.-]/-}"
         tag="${tag:0:64}"
     fi
@@ -464,7 +464,7 @@ net_fw_allow() {
             ;;
         nft)
             _net_nft_allow "$port" "$proto" "$tag" || rc=1
-            # 独立的 inet px 表不能覆盖 firewalld/ufw 自己的 DROP 链，
+            # 独立的 inet oneclick 表不能覆盖 firewalld/ufw 自己的 DROP 链，
             # 所以活跃的管理器必须同步放行，否则装了也连不上。
             if _net_firewalld_active; then
                 _net_firewalld_allow "$port" "$proto" || rc=1
@@ -474,31 +474,31 @@ net_fw_allow() {
             fi
             ;;
         *)
-            px_warn "未检测到可用防火墙，跳过放行 ${port}/${proto}；请在云安全组放行"
+            oc_warn "未检测到可用防火墙，跳过放行 ${port}/${proto}；请在云安全组放行"
             return 0
             ;;
     esac
     if ((rc == 0)); then
-        px_ok "已放行 ${port}/${proto}（${backend}）"
+        oc_ok "已放行 ${port}/${proto}（${backend}）"
     else
-        px_err "放行 ${port}/${proto} 失败（${backend}）"
+        oc_err "放行 ${port}/${proto} 失败（${backend}）"
     fi
     return "$rc"
 }
 
-# net_fw_deny <port> <tcp|udp> [comment]：撤销放行，只删 px-* 规则
+# net_fw_deny <port> <tcp|udp> [comment]：撤销放行，只删 oneclick-* 规则
 net_fw_deny() {
     local port proto tag any=0 rc=0
-    port="$(_net_port_num "${1:-}")" || { px_err "net_fw_deny: 端口非法：${1:-<空>}"; return 1; }
+    port="$(_net_port_num "${1:-}")" || { oc_err "net_fw_deny: 端口非法：${1:-<空>}"; return 1; }
     proto="${2:-tcp}"
     tag="${3:-}"
     case "$proto" in
         tcp|udp) ;;
-        *) px_err "net_fw_deny: 协议应为 tcp|udp：$proto"; return 1 ;;
+        *) oc_err "net_fw_deny: 协议应为 tcp|udp：$proto"; return 1 ;;
     esac
     # 后端可能在安装后被换掉（比如后来装了 nftables），所以所有存在的后端都尝试一遍；
-    # 每个删除路径都只匹配 px- comment 或精确端口，不会误删别人的规则。
-    if command -v nft >/dev/null 2>&1 && nft list table inet px >/dev/null 2>&1; then
+    # 每个删除路径都只匹配 oneclick- comment 或精确端口，不会误删别人的规则。
+    if command -v nft >/dev/null 2>&1 && nft list table inet oneclick >/dev/null 2>&1; then
         _net_nft_deny "$port" "$proto" "$tag" || rc=1
         any=1
     fi
@@ -515,50 +515,50 @@ net_fw_deny() {
         any=1
     fi
     if ((any == 0)); then
-        px_warn "未检测到防火墙，无需撤销 ${port}/${proto}"
+        oc_warn "未检测到防火墙，无需撤销 ${port}/${proto}"
         return 0
     fi
     if ((rc == 0)); then
-        px_ok "已撤销 ${port}/${proto} 的放行规则"
+        oc_ok "已撤销 ${port}/${proto} 的放行规则"
     fi
     return "$rc"
 }
 
-# net_fw_status：打印后端 + 各管理器里属于 px 的规则数量
+# net_fw_status：打印后端 + 各管理器里属于 oneclick 的规则数量
 net_fw_status() {
     local backend n
     backend="$(net_fw_backend)"
-    px_kv "防火墙后端" "$backend"
-    if command -v nft >/dev/null 2>&1 && nft list table inet px >/dev/null 2>&1; then
-        n="$(nft -a list table inet px 2>/dev/null | grep -c 'comment "px-' || true)"
-        px_kv "nft(inet px) 规则" "${n:-0}"
+    oc_kv "防火墙后端" "$backend"
+    if command -v nft >/dev/null 2>&1 && nft list table inet oneclick >/dev/null 2>&1; then
+        n="$(nft -a list table inet oneclick 2>/dev/null | grep -c 'comment "oneclick-' || true)"
+        oc_kv "nft(inet oneclick) 规则" "${n:-0}"
     fi
     if _net_ipt_available iptables; then
-        n="$(iptables -S INPUT 2>/dev/null | grep -cE 'comment "?px-' || true)"
-        px_kv "iptables(px-) 规则" "${n:-0}"
+        n="$(iptables -S INPUT 2>/dev/null | grep -cE 'comment "?oneclick-' || true)"
+        oc_kv "iptables(oneclick-) 规则" "${n:-0}"
     fi
     if _net_firewalld_active; then
-        px_kv "firewalld 放行端口" "$(firewall-cmd --list-ports 2>/dev/null || true)"
+        oc_kv "firewalld 放行端口" "$(firewall-cmd --list-ports 2>/dev/null || true)"
     fi
     if command -v ufw >/dev/null 2>&1 && _net_ufw_active; then
-        n="$(ufw show added 2>/dev/null | grep -cE "comment 'px-" || true)"
-        px_kv "ufw(px-) 规则" "${n:-0}"
+        n="$(ufw show added 2>/dev/null | grep -cE "comment 'oneclick-" || true)"
+        oc_kv "ufw(oneclick-) 规则" "${n:-0}"
     fi
     return 0
 }
 
 # ===========================================================================
-# BBR / TCP Fast Open：只改两个 sysctl 键，落在 99-px-bbr.conf（TFO 也写这里）
+# BBR / TCP Fast Open：只改两个 sysctl 键，落在 99-oneclick-bbr.conf（TFO 也写这里）
 # ===========================================================================
 
-_net_sysctl_conf() { printf '/etc/sysctl.d/99-px-bbr.conf'; }
+_net_sysctl_conf() { printf '/etc/sysctl.d/99-oneclick-bbr.conf'; }
 
-# 只替换目标 key 那一行，保留文件里其它 PX 调优项（TFO 与 BBR 共用一个文件）
+# 只替换目标 key 那一行，保留文件里其它 OneClick 调优项（TFO 与 BBR 共用一个文件）
 _net_sysctl_write() {
     local key="$1" val="$2" conf tmp
     conf="$(_net_sysctl_conf)"
     mkdir -p /etc/sysctl.d 2>/dev/null || return 1
-    tmp="$(mktemp '/etc/sysctl.d/.99-px-bbr.XXXXXX')" || return 1
+    tmp="$(mktemp '/etc/sysctl.d/.99-oneclick-bbr.XXXXXX')" || return 1
     if [[ -f "$conf" ]]; then
         awk -v k="$key" '
             {
@@ -567,7 +567,7 @@ _net_sysctl_write() {
                 if (index(line, k "=") != 1) print
             }' "$conf" > "$tmp" || true
     else
-        printf '# PX 网络调优：BBR / TCP Fast Open（由 px 生成，可直接删除）\n' > "$tmp"
+        printf '# OneClick 网络调优：BBR / TCP Fast Open（由 oneclick 生成，可直接删除）\n' > "$tmp"
     fi
     printf '%s = %s\n' "$key" "$val" >> "$tmp"
     chmod 644 "$tmp" 2>/dev/null || true
@@ -611,28 +611,28 @@ net_bbr_status() {
     local cc qdisc
     cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
     qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
-    px_kv "拥塞控制算法" "${cc:-未知}"
-    px_kv "默认队列规则" "${qdisc:-未知}"
+    oc_kv "拥塞控制算法" "${cc:-未知}"
+    oc_kv "默认队列规则" "${qdisc:-未知}"
     [[ "$cc" == 'bbr' ]]
 }
 
 net_bbr_enable() {
     if net_bbr_status >/dev/null 2>&1; then
-        px_ok "BBR 已启用，无需重复配置"
+        oc_ok "BBR 已启用，无需重复配置"
         return 0
     fi
     if ! _net_bbr_supported; then
-        px_err "当前内核不支持 BBR（需 4.9+ 且未禁用 tcp_bbr）"
+        oc_err "当前内核不支持 BBR（需 4.9+ 且未禁用 tcp_bbr）"
         return 1
     fi
     # 先设 qdisc 再切 cc，切换过程不断流
     _net_sysctl_apply net.core.default_qdisc fq || return 1
     _net_sysctl_apply net.ipv4.tcp_congestion_control bbr || return 1
     if net_bbr_status >/dev/null 2>&1; then
-        px_ok "BBR 已启用（写入 $(_net_sysctl_conf)）"
+        oc_ok "BBR 已启用（写入 $(_net_sysctl_conf)）"
         return 0
     fi
-    px_err "BBR 未生效：容器/虚拟化可能限制 sysctl，请检查"
+    oc_err "BBR 未生效：容器/虚拟化可能限制 sysctl，请检查"
     return 1
 }
 
@@ -640,26 +640,26 @@ net_bbr_enable() {
 net_tfo_status() {
     local v
     v="$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null || true)"
-    px_kv "TCP Fast Open" "${v:-未知}（3 = 客户端+服务端）"
+    oc_kv "TCP Fast Open" "${v:-未知}（3 = 客户端+服务端）"
     [[ "$v" == '3' ]]
 }
 
 net_tfo_enable() {
     if net_tfo_status >/dev/null 2>&1; then
-        px_ok "TCP Fast Open 已启用（值=3），无需重复配置"
+        oc_ok "TCP Fast Open 已启用（值=3），无需重复配置"
         return 0
     fi
     _net_sysctl_apply net.ipv4.tcp_fastopen 3 || return 1
     if net_tfo_status >/dev/null 2>&1; then
-        px_ok "TCP Fast Open 已启用（写入 $(_net_sysctl_conf)）"
+        oc_ok "TCP Fast Open 已启用（写入 $(_net_sysctl_conf)）"
         return 0
     fi
-    px_err "TCP Fast Open 未生效（部分内核/容器限制）"
+    oc_err "TCP Fast Open 未生效（部分内核/容器限制）"
     return 1
 }
 
 # ===========================================================================
-# UDP 端口跳跃：PREROUTING DNAT 到本机目标端口，comment px-hop-<key>
+# UDP 端口跳跃：PREROUTING DNAT 到本机目标端口，comment oneclick-hop-<key>
 # ===========================================================================
 
 _net_hop_key() {
@@ -741,7 +741,7 @@ _net_hop_nft_add() {
     _net_nft_prerouting_ready || return 1
     _net_nft_has_rule prerouting udp "$start-$end" "$tag" && return 0
     # redirect to :port 等价于"改端口 + 落到本机"，正是本地端口跳跃需要的
-    nft add rule inet px prerouting udp dport "$start-$end" redirect to ":$target" comment "\"$tag\"" 2>/dev/null || return 1
+    nft add rule inet oneclick prerouting udp dport "$start-$end" redirect to ":$target" comment "\"$tag\"" 2>/dev/null || return 1
     _net_nft_persist
     return 0
 }
@@ -749,7 +749,7 @@ _net_hop_nft_add() {
 _net_hop_nft_del() {
     local tag="$1"
     local -a hs=()
-    nft list chain inet px prerouting >/dev/null 2>&1 || return 0
+    nft list chain inet oneclick prerouting >/dev/null 2>&1 || return 0
     mapfile -t hs < <(_net_nft_handles_for_tag prerouting "$tag")
     [[ ${#hs[@]} -eq 0 ]] && return 0
     _net_nft_del_handles prerouting "${hs[@]}"
@@ -759,7 +759,7 @@ _net_hop_nft_del() {
 
 _net_hop_nft_show() {
     local tag="$1"
-    nft -a list chain inet px prerouting 2>/dev/null | awk -v tag="\"$tag\"" '
+    nft -a list chain inet oneclick prerouting 2>/dev/null | awk -v tag="\"$tag\"" '
         index($0, "comment " tag) { gsub(/^[ \t]+/, ""); print "  nft: " $0 }'
 }
 
@@ -773,15 +773,15 @@ _net_hop_all() {
 # net_nat_hop_add <key> <port_start> <port_end> <target_port>
 net_nat_hop_add() {
     local key start end target tag
-    key="$(_net_hop_key "${1:-}")" || { px_err "net_nat_hop_add: key 非法（仅限字母数字_-）"; return 1; }
-    start="$(_net_port_num "${2:-}")" || { px_err "net_nat_hop_add: 起始端口非法"; return 1; }
-    end="$(_net_port_num "${3:-}")" || { px_err "net_nat_hop_add: 结束端口非法"; return 1; }
-    target="$(_net_port_num "${4:-}")" || { px_err "net_nat_hop_add: 目标端口非法"; return 1; }
+    key="$(_net_hop_key "${1:-}")" || { oc_err "net_nat_hop_add: key 非法（仅限字母数字_-）"; return 1; }
+    start="$(_net_port_num "${2:-}")" || { oc_err "net_nat_hop_add: 起始端口非法"; return 1; }
+    end="$(_net_port_num "${3:-}")" || { oc_err "net_nat_hop_add: 结束端口非法"; return 1; }
+    target="$(_net_port_num "${4:-}")" || { oc_err "net_nat_hop_add: 目标端口非法"; return 1; }
     if ((start > end)); then
-        px_err "net_nat_hop_add: 端口范围非法（$start > $end）"
+        oc_err "net_nat_hop_add: 端口范围非法（$start > $end）"
         return 1
     fi
-    tag="px-hop-$key"
+    tag="oneclick-hop-$key"
     # nat 表与 input 防火墙后端无关：优先 iptables（兼容性最好），失败再试 nft。
     # 老内核没有 inet 族 nat 链，所以不能只依赖 nft。
     local ok=0
@@ -796,41 +796,41 @@ net_nat_hop_add() {
         fi
     fi
     if ((ok == 0)); then
-        px_err "net_nat_hop_add: iptables 与 nftables 均不可用，无法配置端口跳跃"
+        oc_err "net_nat_hop_add: iptables 与 nftables 均不可用，无法配置端口跳跃"
         return 1
     fi
-    px_ok "端口跳跃：UDP ${start}-${end} → ${target}（${tag}）"
+    oc_ok "端口跳跃：UDP ${start}-${end} → ${target}（${tag}）"
     return 0
 }
 
 # net_nat_hop_del <key>：按 comment 精确删除，绝不碰别人的规则
 net_nat_hop_del() {
     local key tag left
-    key="$(_net_hop_key "${1:-}")" || { px_err "net_nat_hop_del: key 非法（仅限字母数字_-）"; return 1; }
-    tag="px-hop-$key"
+    key="$(_net_hop_key "${1:-}")" || { oc_err "net_nat_hop_del: key 非法（仅限字母数字_-）"; return 1; }
+    tag="oneclick-hop-$key"
     _net_hop_ipt_del "$tag"
     _net_hop_nft_del "$tag"
     left="$(_net_hop_all "$tag")"
     if [[ -n "$left" ]]; then
-        px_warn "仍有端口跳跃规则残留（${tag}），请手动检查："
+        oc_warn "仍有端口跳跃规则残留（${tag}），请手动检查："
         printf '%s\n' "$left"
         return 1
     fi
-    px_ok "端口跳跃规则已清理（${tag}）"
+    oc_ok "端口跳跃规则已清理（${tag}）"
     return 0
 }
 
 # net_nat_hop_show <key>
 net_nat_hop_show() {
     local key tag out
-    key="$(_net_hop_key "${1:-}")" || { px_err "net_nat_hop_show: key 非法（仅限字母数字_-）"; return 1; }
-    tag="px-hop-$key"
+    key="$(_net_hop_key "${1:-}")" || { oc_err "net_nat_hop_show: key 非法（仅限字母数字_-）"; return 1; }
+    tag="oneclick-hop-$key"
     out="$(_net_hop_all "$tag")"
     if [[ -z "$out" ]]; then
-        px_info "无端口跳跃规则（${tag}）"
+        oc_info "无端口跳跃规则（${tag}）"
         return 0
     fi
-    px_title "端口跳跃 ${tag}"
+    oc_title "端口跳跃 ${tag}"
     printf '%s\n' "$out"
     return 0
 }
