@@ -1,0 +1,530 @@
+# ============================================================
+# proto/snell.sh —— Snell v6（NSSurge 官方 snell-server）
+# 对外：proto_snell_meta / install / uninstall / status / link / regen / clash / surge / singbox
+# 内部辅助：pxp_snell_*（本文件私有；build.sh 拼接时不允许与之重名）
+#
+# 版本：上游 snell.sh 内置的是 6.0.0rc2；dl.nssurge.com 上 6.0.0 正式版早已发布，
+#       这里固定装正式版——rc 版的协议/配置行为官方不承诺，不适合当长期安装源。
+# 架构：官方 v6.0.0 只发 amd64 / aarch64 / i386 三个包（armv7l 实测 HTTP 404），
+#       所以 armv7l 直接报错，不拼一个必然 404 的地址让用户等下载重试耗尽。
+#
+# v6 配置事实（对 6.0.0 二进制的 strings 静态核对，不是凭记忆）：
+#   [snell-server] 只认 listen / psk / mode / dns / dns-ip-preference /
+#   egress-interface / ipv6（已标 deprecated）；整个二进制里没有 obfs、也没有 tfo 字样。
+#   即 v6 用 mode(default|unshaped|unsafe-raw) 取代了 v4 的 obfs，写 obfs = off 是
+#   "无害但无效"的遗留项。故本文件不写 obfs 键、不做 obfs 交互。
+#   psk 官方要求 12–255 字节；上游脚本按 16–255 校验，这里沿用更严的 16 下限。
+#
+# 监听只写 0.0.0.0：v6 支持逗号分隔多地址，但 [::] 在无 IPv6 栈的机器上会导致
+# 启动失败；ipv6 键已 deprecated，保留成注释行，需要时用户自己打开。
+# ============================================================
+
+# 固定版本（升级只改这一处；同时用于下载 URL 与 db.version）
+PX_SNELL_VER="${PX_SNELL_VER:-6.0.0}"
+
+# 默认端口：Snell 上游习惯 2345，保持一致，客户端模板不用改
+PX_SNELL_DEFAULT_PORT="${PX_SNELL_DEFAULT_PORT:-2345}"
+
+# ---------- 内部辅助 ----------
+
+# PX_ARCH -> dl.nssurge.com 的架构段。注意上游叫 aarch64，而 PX_ARCH 叫 arm64
+pxp_snell_dl_arch() {
+    case "${1:-}" in
+        amd64)  printf 'amd64' ;;
+        arm64)  printf 'aarch64' ;;
+        i386)   printf 'i386' ;;
+        armv7l) px_err "Snell v6.0.0 官方未提供 armv7l 构建（只有 v4/v5 有）；请改用 amd64/arm64 或跳过本协议" ;;
+        *)      px_err "Snell 不支持当前架构：${1:-未知}" ;;
+    esac
+}
+
+pxp_snell_name() {
+    printf '%s' "${PX_PROTO_TITLE[snell]:-Snell v6}"
+}
+
+pxp_snell_dir() {
+    px_proto_dir snell
+}
+
+pxp_snell_cfg() {
+    printf '%s/snell-server.conf' "$(pxp_snell_dir)"
+}
+
+pxp_snell_bin() {
+    printf '%s/snell-server' "$PX_BIN_DIR"
+}
+
+pxp_snell_unit() {
+    px_unit_name snell
+}
+
+# 防火墙规则 tag：与 99-menu.sh 的 "px-$key" 完全一致，
+# 这样菜单改端口时放的规则和本文件撤销的规则能对上，不会各留一份。
+pxp_snell_tag() {
+    printf 'px-snell'
+}
+
+# 默认端口：状态库已有值就沿用（重装/改端口后再装都保持同一个入口）
+pxp_snell_default_port() {
+    local port
+    port="$(db_get snell port "")"
+    printf '%s' "${port:-$PX_SNELL_DEFAULT_PORT}"
+}
+
+pxp_snell_port_ok() {
+    local p="${1:-}" n
+    [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
+    n=$((10#$p))
+    ((n >= 1 && n <= 65535))
+}
+
+# 端口协商：PX_ARG_PORT > 状态库/meta 默认 > 交互；占用时报错并给候选端口。
+# 重装且端口等于旧端口时跳过占用检查：那个监听是我们自己，稍后会被 stop 掉。
+pxp_snell_ask_port() {
+    local def old port alt
+    def="$(pxp_snell_default_port)"
+    old="$(db_get snell port "")"
+    port="${PX_ARG_PORT:-}"
+    if [[ -z "$port" ]]; then
+        port="$(px_ask "Snell 监听端口（TCP）" "$def")"
+    fi
+    port="${port//[[:space:]]/}"
+    pxp_snell_port_ok "$port" || {
+        px_err "端口不合法：${port:-空}（应为 1-65535 的整数）"
+        return 1
+    }
+    if [[ "$port" != "$old" ]] && net_port_in_use "$port" tcp; then
+        alt="$(net_port_pick "$PX_SNELL_DEFAULT_PORT" tcp || true)"
+        px_err "端口 $port/tcp 已被占用；可改用空闲端口，例如 --port ${alt:-8443}"
+        return 1
+    fi
+    printf '%s' "$port"
+}
+
+# PSK：重装沿用状态库旧值（客户端不用重新导入），只有坏值才重新生成
+pxp_snell_psk() {
+    local psk
+    psk="$(db_get snell psk "")"
+    if [[ "$psk" =~ ^[^[:space:]]{16,255}$ ]]; then
+        printf '%s' "$psk"
+        return 0
+    fi
+    psk="$(os_random_token 20)"
+    [[ ${#psk} -ge 16 ]] || return 1
+    printf '%s' "$psk"
+}
+
+# 写配置：600；先写临时文件再原子替换，中断不会留下半截配置
+pxp_snell_write_config() {
+    local port="$1" psk="$2" dir cfg tmp
+    dir="$(pxp_snell_dir)"
+    cfg="$(pxp_snell_cfg)"
+    mkdir -p "$dir" || {
+        px_err "创建目录失败：$dir"
+        return 1
+    }
+    chmod 700 "$dir" 2>/dev/null || true
+    tmp="${cfg}.tmp.$$"
+    {
+        printf '# PX 生成；改动后执行 px --regen snell 让服务重载\n'
+        printf '[snell-server]\n'
+        printf 'listen = 0.0.0.0:%s\n' "$port"
+        printf 'psk = %s\n' "$psk"
+        printf 'mode = default\n'
+        printf 'dns-ip-preference = default\n'
+        printf '# ipv6 = false\n'
+    } > "$tmp" || {
+        rm -f -- "$tmp"
+        px_err "写入配置失败：$cfg"
+        return 1
+    }
+    chmod 600 "$tmp" 2>/dev/null || true
+    if ! mv -f -- "$tmp" "$cfg"; then
+        rm -f -- "$tmp"
+        px_err "替换配置失败：$cfg"
+        return 1
+    fi
+    chmod 600 "$cfg" 2>/dev/null || true
+}
+
+# 从已有配置里读监听端口（重装/改端口时用来撤掉旧端口规则，避免规则越积越多）
+pxp_snell_cfg_port() {
+    local cfg="$1"
+    [[ -f "$cfg" ]] || return 0
+    sed -n 's/^[[:space:]]*listen[[:space:]]*=[[:space:]]*0\.0\.0\.0:\([0-9][0-9]*\).*/\1/p' "$cfg" | head -n1
+}
+
+pxp_snell_ip() {
+    local ip
+    ip="$(db_setting ip)"
+    if [[ -z "$ip" ]]; then
+        ip="$(net_primary_ip)"
+    fi
+    printf '%s' "$ip"
+}
+
+# 主机名片段：IPv6 必须加方括号才能拼进 URI/Surge 行
+pxp_snell_host() {
+    local ip
+    ip="$(pxp_snell_ip)"
+    [[ -z "$ip" ]] && return 1
+    [[ "$ip" == *:* ]] && ip="[${ip}]"
+    printf '%s' "$ip"
+}
+
+# ---------- SPEC §10 契约函数 ----------
+
+proto_snell_meta() {
+    printf 'title=%s\n' "$(pxp_snell_name)"
+    printf 'desc=Snell v6 单端口 TCP，抗主动探测强；v6 用 mode 取代 obfs\n'
+    printf 'port=%s\n' "$(pxp_snell_default_port)"
+    printf 'udp=no\n'
+    printf 'cert=no\n'
+}
+
+proto_snell_install() {
+    local unit bin cfg port psk ver arch asset url tmp cur old_port ip
+
+    px_require_root
+    [[ -n "${PX_ARCH:-}" ]] || os_detect
+
+    # 1. 判重：状态库里有记录就要求确认（PX_YES=1 直接失败，避免脚本化误覆盖）
+    if db_has snell; then
+        if [[ "${PX_YES:-0}" == "1" ]]; then
+            px_die "Snell v6 已安装；非交互模式不覆盖，请先卸载（px --uninstall snell --yes）"
+        fi
+        px_confirm "Snell v6 已安装，是否重新安装（覆盖配置）？" n || {
+            px_info "已取消"
+            return 0
+        }
+    fi
+
+    px_title "安装 Snell v6"
+
+    # 2. 依赖：Snell 是 zip 包，base 里的 unzip 已够用（dl_unzip 还会兜底安装）
+    os_dep_install base || px_die "基础依赖安装失败，无法继续"
+
+    arch="$(pxp_snell_dl_arch "${PX_ARCH:-}")" || return 1
+    bin="$(pxp_snell_bin)"
+    ver=""
+    # 已装同主版本的二进制就复用，省一次 10MB 下载；主版本不是 6（比如上游脚本装的 v4）必须覆盖，
+    # 否则配置里的 mode 会被老版本当成未知键，链接声称 v6 实际却是 v4。
+    if [[ -x "$bin" ]]; then
+        cur="$("$bin" --version 2>/dev/null | head -n1 || true)"
+        cur="$(printf '%s' "$cur" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)"
+        if [[ "${cur%%.*}" == "6" ]]; then
+            ver="$cur"
+            px_ok "复用已安装的 snell-server ${cur}：$bin"
+        elif [[ -n "$cur" ]]; then
+            px_warn "已有 snell-server ${cur} 不是 v6，将覆盖为 v${PX_SNELL_VER}"
+        fi
+    fi
+    if [[ -z "$ver" ]]; then
+        asset="snell-server-v${PX_SNELL_VER}-linux-${arch}.zip"
+        url="https://dl.nssurge.com/snell/${asset}"
+        tmp="$(mktemp -d "${TMPDIR:-/tmp}/px-snell.XXXXXX")" || px_die "创建临时目录失败"
+        px_info "下载 Snell v${PX_SNELL_VER}（linux-${arch}）..."
+        if ! dl_fetch "$url" "$tmp/snell.zip"; then
+            rm -rf -- "$tmp"
+            px_die "Snell 下载失败（dl.nssurge.com 可能限流或不可达）；可稍后重试或手动放到 $bin"
+        fi
+        if ! dl_unzip "$tmp/snell.zip" "$tmp/x"; then
+            rm -rf -- "$tmp"
+            px_die "Snell 压缩包解压失败"
+        fi
+        if [[ ! -f "$tmp/x/snell-server" ]]; then
+            rm -rf -- "$tmp"
+            px_die "压缩包内未找到 snell-server"
+        fi
+        if ! install -m 755 "$tmp/x/snell-server" "$bin"; then
+            rm -rf -- "$tmp"
+            px_die "安装 snell-server 到 $bin 失败"
+        fi
+        rm -rf -- "$tmp"
+        if ! "$bin" --version >/dev/null 2>&1; then
+            # 这里不直接判死：静态 Go 二进制正常都能跑，真跑不起来时下面的启动校验
+            # 会带着 journalctl 日志报错，比这里一句话更好排查。
+            px_warn "snell-server 版本自检失败（继续，启动阶段会暴露真实原因）"
+        fi
+        ver="$PX_SNELL_VER"
+        px_ok "snell-server v${ver} 已安装：$bin"
+    fi
+
+    # 3. 上次安装中断可能留下 unit 而状态库没有记录：先清掉，
+    #    否则下面的端口占用检查会把自己上一次的监听当成别人的端口。
+    unit="$(pxp_snell_unit)"
+    if ! db_has snell && [[ "$(svc_status "$unit")" != "not-found" ]]; then
+        px_warn "发现上次安装残留的 systemd 单元 $unit，先清理"
+        svc_remove "$unit"
+    fi
+
+    # 4. 端口与凭据
+    port="$(pxp_snell_ask_port)" || return 1
+    psk="$(pxp_snell_psk)" || px_die "生成 PSK 失败（os_random_token / openssl 不可用？）"
+    [[ -n "$psk" ]] || px_die "PSK 为空，已中止"
+
+    # 5. 配置（600）。先记下旧配置端口，成功后撤旧端口规则
+    cfg="$(pxp_snell_cfg)"
+    old_port="$(pxp_snell_cfg_port "$cfg")"
+    pxp_snell_write_config "$port" "$psk" || px_die "写入 Snell 配置失败"
+    px_ok "配置已写入：$cfg"
+
+    # 6. systemd：重装时先 stop。svc_start 对已运行的服务是空操作，
+    #    不先停就会"启动成功"但仍在跑旧配置。
+    svc_create "$unit" "$bin -c $cfg" "PX Snell v6 (snell-server)"
+    svc_enable "$unit"
+    svc_stop "$unit"
+    svc_start "$unit"
+    sleep 1
+    if ! svc_is_active "$unit"; then
+        px_err "Snell 启动失败，最近日志："
+        svc_logs "$unit" 30 >&2
+        px_die "安装中止（配置保留在 $cfg，修正后可用 px --regen snell 重试）"
+    fi
+    px_ok "服务已启动：$unit"
+
+    # 7. 防火墙：Snell 只有 TCP。先按 tag 撤旧规则再放行，重跑不叠加
+    net_fw_deny "$port" tcp "$(pxp_snell_tag)" >/dev/null 2>&1 || true
+    net_fw_allow "$port" tcp "$(pxp_snell_tag)" >/dev/null 2>&1 ||
+        px_warn "防火墙放行 TCP/${port} 失败，请手动检查"
+    if [[ -n "$old_port" && "$old_port" != "$port" ]]; then
+        net_fw_deny "$old_port" tcp "$(pxp_snell_tag)" >/dev/null 2>&1 || true
+    fi
+
+    # 8. 状态库：所有字段一次写全，最后才 mark_installed（失败时不会留下"已安装"假象）
+    db_set snell port "$port"
+    db_set snell psk "$psk"
+    db_set snell mode "default"
+    db_set snell version "$ver"
+    db_set snell created "$(os_now)"
+    db_mark_installed snell
+    ip="$(net_primary_ip)"
+    [[ -n "$ip" ]] && db_setting ip "$ip"
+
+    # 9. 收尾
+    px_hr
+    px_ok "Snell v6 安装完成"
+    px_kv "服务单元" "$unit"
+    px_kv "配置文件" "$cfg"
+    px_kv "监听端口" "${port}/tcp"
+    px_kv "PSK" "$psk"
+    px_kv "协议版本" "6（mode=default）"
+    px_kv "服务状态" "$(proto_snell_status | head -n1)"
+    px_hr
+    px_info "分享链接（Surge / sing-box ≥1.14 直接支持 v6；mihomo 目前只到 v5）："
+    proto_snell_link || px_warn "暂时取不到公网 IP，稍后可用 px --link snell 查看"
+}
+
+proto_snell_uninstall() {
+    local unit dir bin port cfg
+    px_require_root
+    unit="$(pxp_snell_unit)"
+
+    # 状态库没了但 unit 还在（恢复备份/手工删库）也允许卸载，否则残留服务永远清不掉
+    if ! db_has snell && [[ "$(svc_status "$unit")" == "not-found" ]]; then
+        px_warn "Snell v6 未安装"
+        return 0
+    fi
+    if [[ "${PX_YES:-0}" != "1" ]]; then
+        px_confirm "确认卸载 Snell v6（停止服务、删除配置与防火墙规则）？" n || {
+            px_info "已取消"
+            return 0
+        }
+    fi
+
+    dir="$(pxp_snell_dir)"
+    bin="$(pxp_snell_bin)"
+    cfg="$(pxp_snell_cfg)"
+    port="$(db_get snell port "")"
+    [[ -z "$port" ]] && port="$(pxp_snell_cfg_port "$cfg")"
+
+    svc_remove "$unit"
+    px_ok "已停止并移除服务：$unit"
+    if [[ -n "$port" ]]; then
+        net_fw_deny "$port" tcp "$(pxp_snell_tag)" >/dev/null 2>&1 ||
+            px_warn "撤销 TCP/${port} 放行失败，请手动检查"
+    fi
+    # snell-server 只服务本协议，默认一并删除（PX_YES=1 也按默认 yes 删，避免留孤儿可执行文件）
+    if px_confirm "同时删除 snell-server 二进制 $bin ？" y; then
+        rm -f -- "$bin" && px_ok "已删除 $bin"
+    fi
+    if [[ -n "$dir" && "$dir" == "${PX_ROOT}/"* && -d "$dir" ]]; then
+        rm -rf -- "$dir"
+        px_ok "已删除配置目录：$dir"
+    fi
+    db_del snell
+    db_unmark_installed snell
+    px_ok "Snell v6 已卸载"
+}
+
+proto_snell_status() {
+    local unit port pid st
+    unit="$(pxp_snell_unit)"
+    if ! db_has snell && [[ "$(svc_status "$unit")" == "not-found" ]]; then
+        printf '未安装\n'
+        return 0
+    fi
+    port="$(db_get snell port '-')"
+    st="$(svc_status "$unit")"
+    # SPEC 要求状态行只有这三种形态（菜单用 grep 提取"运行中/已停止"），
+    # 所以不在这一行附带重建提示，避免上层解析出歧义。
+    if [[ "$st" == "active" ]]; then
+        pid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null || true)"
+        printf '运行中 pid=%s port=%s\n' "${pid:-0}" "$port"
+    else
+        printf '已停止\n'
+    fi
+}
+
+proto_snell_link() {
+    local port psk host name
+    if ! db_has snell; then
+        px_err "Snell v6 未安装"
+        return 1
+    fi
+    port="$(db_get snell port "")"
+    psk="$(db_get snell psk "")"
+    [[ -n "$port" && -n "$psk" ]] || {
+        px_err "状态库缺少 port/psk，请重新安装"
+        return 1
+    }
+    host="$(pxp_snell_host)" || {
+        px_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
+        return 1
+    }
+    name="$(pxp_snell_name)"
+    # 官方没有标准化 URI。这里沿用本项目 gen_snell_link 的形状：PSK 直接放在 userinfo
+    # （不做 base64），v6 额外带 mode；片段里的空格编码成 %20，客户端不会截断。
+    printf 'snell://%s@%s:%s?version=6&mode=default#%s\n' \
+        "$psk" "$host" "$port" "${name// /%20}"
+}
+
+proto_snell_regen() {
+    local unit bin cfg port psk old_port
+    px_require_root
+    if ! db_has snell; then
+        px_err "Snell v6 未安装，无法重生成配置"
+        return 1
+    fi
+    port="$(db_get snell port "")"
+    psk="$(db_get snell psk "")"
+    pxp_snell_port_ok "$port" || {
+        px_err "状态库里的端口不合法：${port:-空}（请重新安装）"
+        return 1
+    }
+    [[ "$psk" =~ ^[^[:space:]]{16,255}$ ]] || {
+        px_err "状态库里的 PSK 不合法（需 16-255 字节且不含空白），请重新安装或先换凭据"
+        return 1
+    }
+    bin="$(pxp_snell_bin)"
+    [[ -x "$bin" ]] || {
+        px_err "缺少 $bin，请重新安装"
+        return 1
+    }
+
+    cfg="$(pxp_snell_cfg)"
+    old_port="$(pxp_snell_cfg_port "$cfg")"
+    pxp_snell_write_config "$port" "$psk" || {
+        px_err "写入配置失败：$cfg"
+        return 1
+    }
+
+    # 单元文件可能被手工删掉（或从备份恢复的状态库）：regen 顺手重建，
+    # 这样菜单里的"改端口/换凭据"在任何情况下都能生效。
+    unit="$(pxp_snell_unit)"
+    svc_create "$unit" "$bin -c $cfg" "PX Snell v6 (snell-server)"
+    svc_enable "$unit"
+    svc_restart "$unit"
+    sleep 1
+    if ! svc_is_active "$unit"; then
+        px_err "重启后服务未运行，最近日志："
+        svc_logs "$unit" 30 >&2
+        return 1
+    fi
+
+    # 防火墙补齐（菜单改端口只按 meta 放行了一个协议，这里统一对齐）
+    net_fw_deny "$port" tcp "$(pxp_snell_tag)" >/dev/null 2>&1 || true
+    net_fw_allow "$port" tcp "$(pxp_snell_tag)" >/dev/null 2>&1 || true
+    if [[ -n "$old_port" && "$old_port" != "$port" ]]; then
+        net_fw_deny "$old_port" tcp "$(pxp_snell_tag)" >/dev/null 2>&1 || true
+    fi
+
+    px_ok "配置已重生成并重启：$cfg"
+    proto_snell_status | head -n1
+    return 0
+}
+
+proto_snell_clash() {
+    local port psk host name
+    if ! db_has snell; then
+        px_err "Snell v6 未安装"
+        return 1
+    fi
+    port="$(db_get snell port "")"
+    psk="$(db_get snell psk "")"
+    host="$(pxp_snell_host)" || {
+        px_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
+        return 1
+    }
+    name="$(pxp_snell_name)"
+    # mihomo 只实现到 Snell v1–v5，v6 会被内核拒绝；照实写出 v6 并留一行说明，
+    # 等内核支持后删掉注释即可用。现在要用 v6 请走 Surge 或 sing-box。
+    printf '  # mihomo 目前仅支持 Snell v1-v5；v6 请用 Surge 或 sing-box >= 1.14\n'
+    printf '  - name: "%s"\n' "$name"
+    printf '    type: snell\n'
+    printf '    server: "%s"\n' "$host"
+    printf '    port: %s\n' "$port"
+    printf '    psk: "%s"\n' "$psk"
+    printf '    version: 6\n'
+    printf '    udp: true\n'
+}
+
+proto_snell_surge() {
+    local port psk host name
+    if ! db_has snell; then
+        px_err "Snell v6 未安装"
+        return 1
+    fi
+    port="$(db_get snell port "")"
+    psk="$(db_get snell psk "")"
+    host="$(pxp_snell_host)" || {
+        px_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
+        return 1
+    }
+    name="$(pxp_snell_name)"
+    # 形状对齐 vless-server.sh 的 gen_snell_surge_line：v6 必须带 mode，
+    # reuse/ecn 是 Surge 侧优化项，对端不支持会自动忽略。
+    printf '%s = snell, %s, %s, psk=%s, version=6, mode=default, reuse=true, tfo=true, ecn=true\n' \
+        "$name" "$host" "$port" "$psk"
+}
+
+proto_snell_singbox() {
+    local port psk host name
+    if ! db_has snell; then
+        px_err "Snell v6 未安装"
+        return 1
+    fi
+    port="$(db_get snell port "")"
+    psk="$(db_get snell psk "")"
+    host="$(pxp_snell_host)" || {
+        px_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
+        return 1
+    }
+    name="$(pxp_snell_name)"
+    # sing-box 自 1.14.0 起支持 Snell v6（outbound/snell：version + mode），
+    # 所以这里给合法对象，不需要像 mihomo 那样退回失败。
+    jq -c -n \
+        --argjson port "$port" \
+        --arg server "$host" \
+        --arg psk "$psk" \
+        --arg tag "$name" \
+        '{
+            type: "snell",
+            tag: $tag,
+            server: $server,
+            server_port: $port,
+            version: 6,
+            psk: $psk,
+            mode: "default"
+        }'
+}

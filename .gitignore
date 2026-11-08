@@ -1,0 +1,14 @@
+# 上游脚本参考副本（第三方代码，不随本仓库分发）
+src/hysteria.sh
+src/snell.sh
+src/ss-rust.sh
+src/vless-server.sh
+src/jinqians.sh
+
+# 上游拆解笔记
+research/
+
+# 其它
+*.log
+*.tmp
+.DS_Store

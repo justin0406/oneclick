@@ -1,0 +1,300 @@
+# lib/share.sh —— 分享链接与订阅产物（Clash / Surge / sing-box / URI / 二维码）
+#
+# 约定：
+#   - 所有内容生成逻辑只往 stdout 打内容，提示一律走 px_info/px_warn（stderr），
+#     这样 share_render_sub 里 `... >/dev/null` 之后 stdout 还能干净地只留路径。
+#   - 片段渲染全部委托给各协议实现的 link/clash/surge/singbox 渲染函数，
+#     这里不关心任何协议细节；某协议片段生成失败（如拿不到公网 IP）就跳过并警告，
+#     不能让一条坏节点把整份订阅带崩。
+
+# 拼协议函数名。不要用字面量前缀紧接 ${...} 的写法：build.sh 的未定义函数扫描
+# 会把前缀后直接跟变量的地方当成一个不存在的函数名，导出误报。
+_share_fn() {
+    local p="proto"
+    printf '%s_%s_%s' "$p" "$1" "$2"
+}
+
+# _share_write <kind> <outfile|stdout|""> <content>
+# 落盘时用 umask 077 创建，保证订阅里带 uuid/私钥的文件从出生就是 600。
+_share_write() {
+    local kind="$1" target="$2" body="$3" dir
+    if [[ -z "$target" || "$target" == "stdout" ]]; then
+        printf '%s\n' "$body"
+        return 0
+    fi
+    dir="$(dirname -- "$target")"
+    if [[ ! -d "$dir" ]]; then
+        mkdir -p "$dir" || {
+            px_err "创建目录失败：$dir"
+            return 1
+        }
+    fi
+    if ! ( umask 077; printf '%s\n' "$body" > "$target" ); then
+        px_err "写入失败：$target"
+        return 1
+    fi
+    chmod 600 "$target" 2>/dev/null || true
+    px_info "$kind 订阅已写入：$target" >&2
+    printf '%s\n' "$target"
+}
+
+# share_render_uri <key> —— 只输出该协议的分享 URI
+share_render_uri() {
+    local key="${1:-}" fn
+    if [[ -z "$key" ]]; then
+        px_err "用法：share_render_uri <key>"
+        return 1
+    fi
+    if ! db_is_installed "$key"; then
+        px_err "协议未安装：$key"
+        return 1
+    fi
+    fn="$(_share_fn "$key" link)"
+    "$fn"
+}
+
+# share_render_clash [outfile|stdout] —— 完整可导入的 Clash 配置
+share_render_clash() {
+    local out="${1:-stdout}" key fn frag name body
+    local -a frags=() names=()
+    for key in "${PX_PROTOS[@]}"; do
+        db_is_installed "$key" || continue
+        fn="$(_share_fn "$key" clash)"
+        if ! frag="$("$fn")"; then
+            px_warn "跳过 $key：Clash 片段生成失败（缺公网 IP 或状态库字段不全）"
+            continue
+        fi
+        frags+=("$frag")
+        # 片段里的 name 就是协议标题，代理组按同一套名字引用，避免两处名字漂移
+        names+=("${PX_PROTO_TITLE[$key]:-$key}")
+    done
+    if [[ ${#frags[@]} -eq 0 ]]; then
+        px_err "没有可用的已安装协议，无法生成 Clash 订阅"
+        return 1
+    fi
+    body="$(
+        printf 'mixed-port: 7897\n'
+        printf 'allow-lan: false\n'
+        printf 'mode: rule\n'
+        printf 'log-level: info\n'
+        printf 'proxies:\n'
+        for frag in "${frags[@]}"; do printf '%s\n' "$frag"; done
+        printf 'proxy-groups:\n'
+        printf '  - name: PROXY\n'
+        printf '    type: select\n'
+        printf '    proxies:\n'
+        for name in "${names[@]}"; do printf '      - "%s"\n' "$name"; done
+        printf 'rules:\n'
+        printf '  - GEOIP,CN,DIRECT\n'
+        printf '  - MATCH,PROXY\n'
+    )"
+    _share_write "Clash" "$out" "$body"
+}
+
+# share_render_surge [outfile|stdout] —— 完整可导入的 Surge conf
+share_render_surge() {
+    local out="${1:-stdout}" key fn frag name joined body
+    local -a frags=() names=()
+    for key in "${PX_PROTOS[@]}"; do
+        db_is_installed "$key" || continue
+        fn="$(_share_fn "$key" surge)"
+        if ! frag="$("$fn")"; then
+            px_warn "跳过 $key：Surge 节点生成失败（缺公网 IP 或状态库字段不全）"
+            continue
+        fi
+        frags+=("$frag")
+        names+=("${PX_PROTO_TITLE[$key]:-$key}")
+    done
+    if [[ ${#frags[@]} -eq 0 ]]; then
+        px_err "没有可用的已安装协议，无法生成 Surge 订阅"
+        return 1
+    fi
+    joined="$(printf '%s, ' "${names[@]}")"
+    joined="${joined%, }"
+    body="$(
+        printf '[General]\n'
+        printf 'loglevel = notify\n'
+        printf '\n'
+        printf '[Proxy]\n'
+        for frag in "${frags[@]}"; do printf '%s\n' "$frag"; done
+        printf '\n'
+        printf '[Proxy Group]\n'
+        printf 'PROXY = select, %s\n' "$joined"
+        printf '\n'
+        printf '[Rule]\n'
+        printf 'GEOIP,CN,DIRECT\n'
+        printf 'FINAL,PROXY,dns-failed\n'
+    )"
+    _share_write "Surge" "$out" "$body"
+}
+
+# share_render_singbox [outfile|stdout] —— 完整 sing-box 配置（首个出站是 selector）
+share_render_singbox() {
+    local out="${1:-stdout}" key fn frag tag tags_json merged body
+    local -a frags=() tags=()
+    for key in "${PX_PROTOS[@]}"; do
+        db_is_installed "$key" || continue
+        fn="$(_share_fn "$key" singbox)"
+        if ! frag="$("$fn")"; then
+            px_warn "跳过 $key：sing-box 片段生成失败（缺公网 IP 或状态库字段不全）"
+            continue
+        fi
+        # 片段必须是 JSON 对象，否则拼进去整份配置就废了
+        if ! printf '%s' "$frag" | jq -e 'type == "object"' >/dev/null 2>&1; then
+            px_warn "跳过 $key：sing-box 片段不是合法 JSON 对象"
+            continue
+        fi
+        tag="$(printf '%s' "$frag" | jq -r '.tag // empty' 2>/dev/null)"
+        if [[ -z "$tag" ]]; then
+            tag="${PX_PROTO_TITLE[$key]:-$key}"
+            frag="$(printf '%s' "$frag" | jq -c --arg t "$tag" '.tag = $t')" || {
+                px_warn "跳过 $key：无法补 tag"
+                continue
+            }
+        fi
+        frags+=("$frag")
+        tags+=("$tag")
+    done
+    if [[ ${#frags[@]} -eq 0 ]]; then
+        px_err "没有可用的已安装协议，无法生成 sing-box 订阅"
+        return 1
+    fi
+    tags_json="$(printf '%s\n' "${tags[@]}" | jq -R . | jq -s -c .)"
+    merged="$(jq -c -n --argjson tags "$tags_json" \
+        '{outbounds: [{type: "selector", tag: "proxy", outbounds: $tags}]}')"
+    if [[ -z "$merged" ]]; then
+        px_err "生成 sing-box 骨架失败（jq 出错）"
+        return 1
+    fi
+    for frag in "${frags[@]}"; do
+        if ! merged="$(printf '%s' "$merged" | jq -c --argjson o "$frag" '.outbounds += [$o]')"; then
+            px_err "拼接 sing-box outbound 失败"
+            return 1
+        fi
+    done
+    body="$(printf '%s' "$merged" | jq .)" || body="$merged"
+    _share_write "sing-box" "$out" "$body"
+}
+
+# share_render_uri_list [outfile|stdout] —— 一行一个 URI（订阅 uri 格式用）
+share_render_uri_list() {
+    local out="${1:-stdout}" key fn uri body=""
+    for key in "${PX_PROTOS[@]}"; do
+        db_is_installed "$key" || continue
+        fn="$(_share_fn "$key" link)"
+        if ! uri="$("$fn")"; then
+            px_warn "跳过 $key：URI 生成失败（缺公网 IP 或状态库字段不全）"
+            continue
+        fi
+        body+="$uri"$'\n'
+    done
+    if [[ -z "$body" ]]; then
+        px_err "没有可用的已安装协议，无法生成 URI 列表"
+        return 1
+    fi
+    _share_write "URI 列表" "$out" "${body%$'\n'}"
+}
+
+# share_render_sub <format> —— 生成 /etc/px/sub/px-<format>.<ext>，stdout 只打印路径
+share_render_sub() {
+    local format="${1:-}" path dir ext
+    case "$format" in
+        clash)   ext="yaml" ;;
+        surge)   ext="conf" ;;
+        singbox) ext="json" ;;
+        uri)     ext="txt" ;;
+        *)
+            px_err "未知订阅格式：${format:-<空>}（可选 clash|surge|singbox|uri）"
+            return 1
+            ;;
+    esac
+    dir="$PX_SUB_DIR"
+    if [[ ! -d "$dir" ]]; then
+        mkdir -p "$dir" || {
+            px_err "创建订阅目录失败：$dir"
+            return 1
+        }
+    fi
+    path="$dir/px-$format.$ext"
+    case "$format" in
+        clash)   share_render_clash "$path" >/dev/null || return 1 ;;
+        surge)   share_render_surge "$path" >/dev/null || return 1 ;;
+        singbox) share_render_singbox "$path" >/dev/null || return 1 ;;
+        uri)     share_render_uri_list "$path" >/dev/null || return 1 ;;
+    esac
+    chmod 600 "$path" 2>/dev/null || true
+    printf '%s\n' "$path"
+}
+
+# share_qr <text> —— 终端二维码；没有 qrencode 就原样打印文本
+share_qr() {
+    local text="${1:-}"
+    if [[ -z "$text" ]]; then
+        px_err "用法：share_qr <text>"
+        return 1
+    fi
+    if command -v qrencode >/dev/null 2>&1; then
+        # ANSIUTF8 用半个字高的块字符，终端里比 ASCII 二维码窄一半
+        qrencode -t ANSIUTF8 "$text" || {
+            px_err "qrencode 执行失败，下面给出原始文本"
+            printf '%s\n' "$text"
+            return 1
+        }
+    else
+        px_warn "未安装 qrencode（px 系统工具里可装），下面直接给出原始文本："
+        printf '%s\n' "$text"
+    fi
+}
+
+# share_print_links <key> —— URI + 三种订阅片段 + 二维码
+share_print_links() {
+    local key="${1:-}" fn uri out
+    if [[ -z "$key" ]]; then
+        px_err "用法：share_print_links <key>"
+        return 1
+    fi
+    if ! db_is_installed "$key"; then
+        px_err "协议未安装：$key"
+        return 1
+    fi
+    px_title "分享：${PX_PROTO_TITLE[$key]:-$key}"
+
+    fn="$(_share_fn "$key" link)"
+    if ! uri="$("$fn")"; then
+        px_err "分享链接生成失败"
+        return 1
+    fi
+    px_info "URI 链接："
+    printf '%s\n' "$uri"
+    printf '\n'
+
+    fn="$(_share_fn "$key" clash)"
+    px_info "Clash 片段（proxies: 下的一项）："
+    if ! out="$("$fn")"; then
+        px_warn "Clash 片段生成失败"
+    else
+        printf '%s\n' "$out"
+    fi
+    printf '\n'
+
+    fn="$(_share_fn "$key" surge)"
+    px_info "Surge 节点行："
+    if ! out="$("$fn")"; then
+        px_warn "Surge 节点生成失败"
+    else
+        printf '%s\n' "$out"
+    fi
+    printf '\n'
+
+    fn="$(_share_fn "$key" singbox)"
+    px_info "sing-box outbound："
+    if out="$("$fn")"; then
+        printf '%s' "$out" | jq . 2>/dev/null || printf '%s\n' "$out"
+    else
+        px_warn "sing-box 片段生成失败"
+    fi
+    printf '\n'
+
+    px_info "扫码导入（v2rayN / NekoBox / Shadowrocket）："
+    share_qr "$uri"
+}
