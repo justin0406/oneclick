@@ -1,28 +1,32 @@
+**English** | [简体中文](README.zh-CN.md)
+
 # OneClick
 
-**一键多协议代理安装器** — 一个脚本、一个入口、一套证书与状态管理。
+**One-click multi-protocol proxy installer** — one script, one entry point, one certificate and state layer.
 
-把 VLESS-Reality、Hysteria2、Snell v6、SS-Rust、AnyTLS 五种服务端收进同一个命令行工具：
-安装、改端口、换证书、生成订阅、备份恢复、卸载，都在一个菜单里完成，不依赖任何面板。
+It puts five server implementations behind a single CLI: VLESS-Reality, Hysteria2, Snell v6,
+SS-Rust and AnyTLS. Install, change ports, rotate certificates, generate client configs,
+back up and restore, or uninstall — all from one menu. No panel required.
 
-- 单文件发行：`dist/oneclick.sh`，约 6000 行，下载后即可运行
-- Debian 13 / Ubuntu 22.04+ 优先，CentOS Stream / RHEL 9 兼容
-- x86_64 / aarch64 / armv7l（AnyTLS 的 sing-box 不提供 i386）
+- Single-file release: `dist/oneclick.sh`, ~6,000 lines, run it right after download
+- Debian 13 / Ubuntu 22.04+ first, CentOS Stream / RHEL 9 compatible
+- x86_64 / aarch64 / armv7l (sing-box, used by AnyTLS, has no i386 build)
 
-## 快速开始
+## Quick start
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/justin0406/oneclick/main/dist/oneclick.sh -o oneclick.sh
 sudo bash oneclick.sh
 ```
 
-首次运行会把自身安装为 `/usr/local/bin/oneclick`（简写 `oc`），随后进入菜单。之后直接：
+The first run installs itself to `/usr/local/bin/oneclick` (short alias `oc`) and opens the menu.
+From then on:
 
 ```bash
 sudo oc
 ```
 
-也可以完全不进菜单：
+Or skip the menu entirely:
 
 ```bash
 sudo oc --install hysteria2 --port 8443 --cert-mode self --yes
@@ -31,82 +35,93 @@ sudo oc --status
 sudo oc --link snell --format surge
 ```
 
-## 支持的协议
+## Supported protocols
 
-| 协议 | 服务端 | 端口 | 证书 | 说明 |
+| Protocol | Server | Port | Certificate | Notes |
 |---|---|---|---|---|
-| VLESS-Reality | xray-core | 443 独占 | 不需要 | REALITY + x25519，抗主动探测最强，建议作为主协议 |
-| Hysteria2 | hysteria | UDP 高位 | 自签 / ACME / 已有 | QUIC，高丢包网络表现好，支持 salamander 混淆与端口跳跃 |
-| Snell v6 | snell-server 6.0.0 | TCP 高位 | 不需要 | 单端口、PSK 认证，Surge 生态原生支持 |
-| SS-Rust | ssserver | TCP + UDP | 仅 ShadowTLS 需要 | 默认 SS2022；ShadowTLS v3 伪装为可选项，默认关闭 |
-| AnyTLS | sing-box | TCP 高位 | **必须**自签 / ACME / 已有 | 低特征 TLS 代理，Surge、Loon、sing-box 客户端均可使用 |
+| VLESS-Reality | xray-core | 443, exclusive | not needed | REALITY + x25519, strongest against active probing; good default |
+| Hysteria2 | hysteria | high UDP | self-signed / ACME / existing | QUIC, good on lossy links; salamander obfuscation and port hopping optional |
+| Snell v6 | snell-server 6.0.0 | high TCP | not needed | single port, PSK auth, native Surge support |
+| SS-Rust | ssserver | TCP + UDP | only for ShadowTLS | SS2022 by default; ShadowTLS v3 available as an opt-in disguise, off by default |
+| AnyTLS | sing-box | high TCP | **required**: self-signed / ACME / existing | low-fingerprint TLS proxy; works with Surge, Loon and sing-box clients |
 
-> AnyTLS 用 sing-box 而非 anytls-go：后者服务端的 TLS 是进程内生成的 1 小时临时证书（无 SAN），
-> 无法使用脚本签发的证书；sing-box 的 anytls inbound 支持 `certificate_path` / `key_path`。
+> **Why AnyTLS runs on sing-box instead of anytls-go:** the anytls-go server generates its TLS
+> certificate in-process — a one-hour RSA key with no SAN — so it can never use a certificate the
+> script issues. The sing-box `anytls` inbound accepts `certificate_path` / `key_path`, which is the
+> only way to keep AnyTLS on the same certificate workflow as everything else.
 
-## 设计原则
+## Design principles
 
-**协议插件化。** 每个协议实现同一组 9 个函数（`meta / install / uninstall / status / link / regen / clash / surge / singbox`），
-菜单、订阅、状态层只遍历注册表，不认识具体协议。新增协议 = 新增一个文件 + 注册一个 key。
+**Protocols are plugins.** Every protocol implements the same nine functions
+(`meta / install / uninstall / status / link / regen / clash / surge / singbox`). The menu, subscription
+and status layers only walk a registry; they never know which protocol they are dealing with.
+Adding a protocol means adding one file and registering one key.
 
-**证书自主签发。** 每个需要 TLS 的协议都支持三条路径：`existing`（粘贴已有证书）、`acme`（acme.sh HTTP-01）、
-`self`（EC P-256 + SAN 自签）。证书缺失时绝不静默生成随机证书，安装流程会停在证书步骤等你选择。
+**You own the certificates.** Every TLS protocol supports three paths: `existing` (paste a certificate
+you already have), `acme` (acme.sh HTTP-01), or `self` (EC P-256 with SAN). A missing certificate never
+silently becomes a random throwaway one — installation stops at the certificate step and asks.
 
-**不碰不属于自己的东西。** 不清空 iptables/nft 整表、不 `chmod -R 777`、不改系统 SSH 配置；
-防火墙规则只增删带 `oneclick-` 注释的条目，nft 使用独立的 `inet oneclick` 表。
+**Nothing outside its own scope is touched.** No flushing of whole iptables/nft tables, no
+`chmod -R 777`, no edits to the system SSH configuration. Firewall rules are added and removed only
+with the `oneclick-` comment, and nft uses its own `inet oneclick` table.
 
-**下载可验证。** 所有二进制走统一下载层：3 次重试、可选镜像前缀（`OC_GH_PROXY`）、有 SHA256 则校验、
-失败自动回滚，不留下半截文件。
+**Downloads are verifiable.** All binaries go through one download layer: three retries, an optional
+mirror prefix (`OC_GH_PROXY`), SHA-256 verification when a digest is available, and rollback on failure
+so no half-written file is left behind.
 
-**卸载即卸载。** 停止服务、取消开机自启、删除 unit 并 `daemon-reload`，配置与证书单独确认是否保留。
+**Uninstall means uninstall.** Services are stopped, disabled, their units removed, and
+`daemon-reload` is run. Configs and certificates are kept only if you explicitly say so.
 
-**单用户。** 不做多用户、流量统计、到期时间、Telegram 机器人 —— 这些交给面板，本脚本只负责把单机代理装好、管好。
+**Single user by design.** No multi-user accounts, traffic accounting, expiry dates or Telegram bot —
+those belong in a panel. This script's job is to install and operate one machine's proxies well.
 
-## 目录结构
+## Layout
 
 ```
 /etc/oneclick/
-├── db.json                # 唯一状态库（jq 原子写 + flock）
-├── certs/<name>/          # cert.pem / key.pem（600）
+├── db.json                # single state store (jq atomic writes + flock)
+├── certs/<name>/          # cert.pem / key.pem (0600)
 ├── sub/                   # oneclick-clash.yaml / -surge.conf / -singbox.json / -uri.txt
-└── <协议 key>/            # 各协议配置（600）
+└── <protocol key>/        # per-protocol config (0600)
 
-/usr/local/bin/oneclick    # 入口（oc 为简写）
+/usr/local/bin/oneclick    # entry point (oc is an alias)
 /usr/local/bin/{xray,hysteria,snell-server,ssserver,sing-box}
-/etc/systemd/system/oneclick-<协议>.service
+/etc/systemd/system/oneclick-<protocol>.service
 ```
 
-## 订阅
+## Subscriptions
 
-`oc --sub` 会为已安装的协议生成四种产物，直接导入对应客户端或挂到自己的订阅服务：
+`oc --sub` renders client configs for every installed protocol:
 
-- `sub/oneclick-clash.yaml` — Clash / mihomo（注意：mihomo 仅支持 Snell v1–v5，v6 请用 Surge 或 sing-box）
+- `sub/oneclick-clash.yaml` — Clash / mihomo (note: mihomo supports Snell v1–v5 only; use Surge or sing-box for v6)
 - `sub/oneclick-surge.conf` — Surge
 - `sub/oneclick-singbox.json` — sing-box
-- `sub/oneclick-uri.txt` — 通用 URI 列表，可生成二维码
+- `sub/oneclick-uri.txt` — plain URI list, also usable for QR codes
 
-## 构建与测试
+## Build and test
 
 ```bash
 ./build.sh
 ```
 
-按 15 个模块拼成 `dist/oneclick.sh`，并执行四项校验：`bash -n`、`shellcheck -S warning`、
-未定义函数扫描（只扫命令位，避免 jq 字段误报）、重复函数定义。改代码只改 `src/`，不要改 `dist/`。
+The build concatenates 15 modules into `dist/oneclick.sh` and runs four checks: `bash -n`,
+`shellcheck -S warning`, an undefined-function scan (command positions only, so jq field names are not
+misread), and duplicate-definition detection. Edit `src/`, never `dist/`.
 
 ```
-src/00-header.sh            常量、协议注册表
+src/00-header.sh            constants, protocol registry
 src/lib/{os,ui,store,dl,net,cert,svc,share}.sh
 src/proto/{vless_reality,hysteria2,snell,ss_rust,anytls}.sh
-src/99-menu.sh              菜单、CLI、main
+src/99-menu.sh              menu, CLI, main
 ```
 
-完整测试流程见 [docs/TESTING.md](docs/TESTING.md)。
+The full Debian 13 test checklist lives in [docs/TESTING.md](docs/TESTING.md).
 
-## 致谢
+## Credits
 
-设计参考了 [Misaka-blog/hysteria-install](https://github.com/Misaka-blog/hysteria-install)、
-翠花 Snell.sh、[xOS/Shadowsocks-Rust](https://github.com/xOS/Shadowsocks-Rust)、
-[jinqians 一键菜单](https://menu.jinqians.com)、[mozisen/surge](https://github.com/mozisen/surge)。
-上游均未声明许可证，本仓库不授予再分发权；运行时组件（Xray、Hysteria、sing-box 等）各自遵循其原始许可。
-详见 [NOTICE.md](NOTICE.md)。
+The design borrows from [Misaka-blog/hysteria-install](https://github.com/Misaka-blog/hysteria-install),
+翠花's Snell.sh, [xOS/Shadowsocks-Rust](https://github.com/xOS/Shadowsocks-Rust),
+[jinqians' menu](https://menu.jinqians.com) and [mozisen/surge](https://github.com/mozisen/surge).
+None of the upstream projects declared a license, so this repository grants no redistribution rights;
+runtime components (Xray, Hysteria, sing-box, …) remain under their own licenses.
+See [NOTICE.md](NOTICE.md) for details.
