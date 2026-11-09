@@ -138,8 +138,7 @@ ocp_vless_reality_cfg_write() {
             outbounds: [
                 {protocol: "freedom", tag: "direct"},
                 {protocol: "blackhole", tag: "block"}
-            ],
-            routing: {rules: [{type: "field", ip: ["geoip:private"], outboundTag: "block"}]}
+            ]
         }' > "$tmp"; then
         rm -f "$tmp"
         oc_err "生成 Xray 配置失败（jq 出错）"
@@ -185,10 +184,11 @@ proto_vless_reality_install() {
     os_detect
 
     if db_has "$key"; then
-        if [[ "$OC_YES" == "1" ]]; then
+        if ! db_is_installed "$key"; then
+            oc_warn "检测到上次未完成的 VLESS-Reality 安装（配置残留），本次将覆盖"
+        elif [[ "$OC_YES" == "1" ]]; then
             oc_die "VLESS-Reality 已安装（--yes 模式不覆盖；请先 --uninstall）"
-        fi
-        if ! oc_confirm "VLESS-Reality 已安装，是否重新安装（覆盖配置）？" n; then
+        elif ! oc_confirm "VLESS-Reality 已安装，是否重新安装（覆盖配置）？" n; then
             oc_info "已取消安装"
             return 0
         fi
@@ -196,6 +196,9 @@ proto_vless_reality_install() {
 
     oc_title "安装 VLESS-Reality"
     os_dep_install base || oc_die "系统依赖安装失败"
+
+    # 端口先判（443 通常独占），避免下载完才发现被占用
+    port="$(ocp_vless_reality_port)" || return 1
 
     bin="$OC_BIN_DIR/xray"
     if [[ -x "$bin" ]] && "$bin" version >/dev/null 2>&1; then
@@ -236,7 +239,6 @@ proto_vless_reality_install() {
         oc_ok "xray 已安装：$("$bin" version 2>/dev/null | head -n1)"
     fi
 
-    port="$(ocp_vless_reality_port)" || return 1
     uuid="$(os_uuid)"
     sid="$(os_random_hex 4)"
     sid="${sid:0:8}"
@@ -331,7 +333,9 @@ proto_vless_reality_uninstall() {
     oc_ok "已停止并移除服务：$unit"
 
     bin="$OC_BIN_DIR/xray"
-    if [[ "$OC_YES" != "1" ]] && oc_confirm "同时删除 xray 二进制 $bin ？" n; then
+    if svc_bin_referenced "$bin"; then
+        oc_warn "检测到其他 systemd 服务仍在引用 $bin（如 x-ui），保留不删"
+    elif [[ "$OC_YES" != "1" ]] && oc_confirm "同时删除 xray 二进制 $bin ？" n; then
         rm -f "$bin"
         oc_ok "已删除 $bin"
     fi

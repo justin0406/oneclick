@@ -462,15 +462,16 @@ proto_ss_rust_install() {
     oc_require_root
     [[ -n "${OC_ARCH:-}" ]] || os_detect
 
-    # 1. 判重：有记录就要求确认；OC_YES=1 直接失败，避免脚本化误覆盖
+    # 1. 判重：以 installed 登记为准，只有残留配置视为上次未完成
     if db_has ss_rust; then
-        if [[ "${OC_YES:-0}" == "1" ]]; then
+        if ! db_is_installed ss_rust; then
+            oc_warn "检测到上次未完成的 SS-Rust 安装（配置残留），本次将覆盖"
+        elif [[ "${OC_YES:-0}" == "1" ]]; then
             oc_die "SS-Rust 已安装；非交互模式不覆盖，请先卸载（oneclick --uninstall ss_rust --yes）"
-        fi
-        oc_confirm "SS-Rust 已安装，是否重新安装（覆盖配置）？" n || {
+        elif ! oc_confirm "SS-Rust 已安装，是否重新安装（覆盖配置）？" n; then
             oc_info "已取消"
             return 0
-        }
+        fi
     fi
 
     oc_title "安装 SS-Rust"
@@ -491,7 +492,10 @@ proto_ss_rust_install() {
         fi
     fi
 
-    # 3. 依赖：.tar.xz 需要 xz，base 里没有，先补
+    # 3. 端口：先判占用（ss 的 tcp 与可选 udp），避免下载完才发现不可用
+    port="$(ocp_ssrust_ask_port)" || return 1
+
+    # 4. 依赖：.tar.xz 需要 xz，base 里没有，先补
     os_dep_install base || oc_die "基础依赖安装失败，无法继续"
     ocp_ssrust_ensure_xz || oc_die "缺少 xz，无法解开 .tar.xz；请手动安装 xz 后重试"
     # 架构先判（ss 与 shadow-tls 的支持面不同，早判早报错）
@@ -504,6 +508,7 @@ proto_ss_rust_install() {
     if [[ -z "$ver" ]]; then
         ver="$(dl_latest_tag shadowsocks/shadowsocks-rust)"
     fi
+    ver="${ver#v}"   # dl_latest_tag 返回原始 tag（v1.25.0），拼 URL 由本函数补 v
     if [[ -z "$ver" ]]; then
         ver="$OC_SSRUST_FALLBACK_VER"
         oc_warn "取不到最新版本号（GitHub API 限流？），回退到已知版本 v${ver}"
@@ -518,7 +523,6 @@ proto_ss_rust_install() {
     fi
 
     # 5. 端口与凭据
-    port="$(ocp_ssrust_ask_port)" || return 1
     method="$(ocp_ssrust_pick_method)" || return 1
     password="$(db_get ss_rust password "")"
     if ! ocp_ssrust_pw_ok "$method" "$password"; then
@@ -557,6 +561,7 @@ proto_ss_rust_install() {
         else
             stver="${OC_SSRUST_STLS_VER:-}"
             [[ -z "$stver" ]] && stver="$(dl_latest_tag ihciah/shadow-tls)"
+            stver="${stver#v}"   # 同上：统一去掉 tag 的 v 前缀
             if [[ -z "$stver" ]]; then
                 stver="$OC_SSRUST_STLS_FALLBACK_VER"
                 oc_warn "取不到 ShadowTLS 最新版本号，回退到已知版本 v${stver}"
@@ -722,7 +727,9 @@ proto_ss_rust_uninstall() {
         net_fw_deny "$stls_port" tcp "$(ocp_ssrust_stls_tag)" >/dev/null 2>&1 || true
     fi
     # 两个二进制都只服务本协议，默认删除（OC_YES=1 按默认 yes 删，避免留孤儿）
-    if oc_confirm "同时删除 ssserver 与 shadow-tls 二进制？" y; then
+    if svc_bin_referenced "$(ocp_ssrust_bin)" || svc_bin_referenced "$(ocp_ssrust_stls_bin)"; then
+        oc_warn "检测到其他 systemd 服务仍在引用 ssserver/shadow-tls，保留不删"
+    elif oc_confirm "同时删除 ssserver 与 shadow-tls 二进制？" y; then
         rm -f -- "$(ocp_ssrust_bin)" && oc_ok "已删除 $(ocp_ssrust_bin)"
         rm -f -- "$(ocp_ssrust_stls_bin)" && oc_ok "已删除 $(ocp_ssrust_stls_bin)"
     fi

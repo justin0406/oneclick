@@ -188,20 +188,30 @@ proto_snell_install() {
     oc_require_root
     [[ -n "${OC_ARCH:-}" ]] || os_detect
 
-    # 1. 判重：状态库里有记录就要求确认（OC_YES=1 直接失败，避免脚本化误覆盖）
+    # 1. 判重：以 installed 登记为准，只有残留配置视为上次未完成
     if db_has snell; then
-        if [[ "${OC_YES:-0}" == "1" ]]; then
+        if ! db_is_installed snell; then
+            oc_warn "检测到上次未完成的 Snell 安装（配置残留），本次将覆盖"
+        elif [[ "${OC_YES:-0}" == "1" ]]; then
             oc_die "Snell v6 已安装；非交互模式不覆盖，请先卸载（oneclick --uninstall snell --yes）"
-        fi
-        oc_confirm "Snell v6 已安装，是否重新安装（覆盖配置）？" n || {
+        elif ! oc_confirm "Snell v6 已安装，是否重新安装（覆盖配置）？" n; then
             oc_info "已取消"
             return 0
-        }
+        fi
     fi
 
     oc_title "安装 Snell v6"
 
-    # 2. 依赖：Snell 是 zip 包，base 里的 unzip 已够用（dl_unzip 还会兜底安装）
+    # 2. 残留清理与端口：先清上次中断留下的 unit（否则它自己的监听会被当成别人占用），
+    #    再判端口，最后才下载，避免白下 10MB 才发现端口不可用。
+    unit="$(ocp_snell_unit)"
+    if ! db_has snell && [[ "$(svc_status "$unit")" != "not-found" ]]; then
+        oc_warn "发现上次安装残留的 systemd 单元 $unit，先清理"
+        svc_remove "$unit"
+    fi
+    port="$(ocp_snell_ask_port)" || return 1
+
+    # 3. 依赖：Snell 是 zip 包，base 里的 unzip 已够用（dl_unzip 还会兜底安装）
     os_dep_install base || oc_die "基础依赖安装失败，无法继续"
 
     arch="$(ocp_snell_dl_arch "${OC_ARCH:-}")" || return 1
@@ -210,8 +220,12 @@ proto_snell_install() {
     # 已装同主版本的二进制就复用，省一次 10MB 下载；主版本不是 6（比如上游脚本装的 v4）必须覆盖，
     # 否则配置里的 mode 会被老版本当成未知键，链接声称 v6 实际却是 v4。
     if [[ -x "$bin" ]]; then
-        cur="$("$bin" --version 2>/dev/null | head -n1 || true)"
-        cur="$(printf '%s' "$cur" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)"
+        # snell-server 把版本打到 stderr（[server_main] <NOTIFY> ...），必须合流才能读到
+        cur="$("$bin" --version 2>&1 | head -n1 || true)"
+        # 输出形如 "2026-11-09 00:02:34.504121 ... snell-server v6.0.0"，直接抓数字会先命中
+        # 时间戳里的小数（34.504121），所以只认 v 前缀的版本号。
+        cur="$(printf '%s' "$cur" | grep -oE 'v[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)"
+        cur="${cur#v}"
         if [[ "${cur%%.*}" == "6" ]]; then
             ver="$cur"
             oc_ok "复用已安装的 snell-server ${cur}：$bin"
@@ -250,16 +264,7 @@ proto_snell_install() {
         oc_ok "snell-server v${ver} 已安装：$bin"
     fi
 
-    # 3. 上次安装中断可能留下 unit 而状态库没有记录：先清掉，
-    #    否则下面的端口占用检查会把自己上一次的监听当成别人的端口。
-    unit="$(ocp_snell_unit)"
-    if ! db_has snell && [[ "$(svc_status "$unit")" != "not-found" ]]; then
-        oc_warn "发现上次安装残留的 systemd 单元 $unit，先清理"
-        svc_remove "$unit"
-    fi
-
-    # 4. 端口与凭据
-    port="$(ocp_snell_ask_port)" || return 1
+    # 4. 凭据
     psk="$(ocp_snell_psk)" || oc_die "生成 PSK 失败（os_random_token / openssl 不可用？）"
     [[ -n "$psk" ]] || oc_die "PSK 为空，已中止"
 
@@ -344,8 +349,11 @@ proto_snell_uninstall() {
         net_fw_deny "$port" tcp "$(ocp_snell_tag)" >/dev/null 2>&1 ||
             oc_warn "撤销 TCP/${port} 放行失败，请手动检查"
     fi
-    # snell-server 只服务本协议，默认一并删除（OC_YES=1 也按默认 yes 删，避免留孤儿可执行文件）
-    if oc_confirm "同时删除 snell-server 二进制 $bin ？" y; then
+    # 默认一并删除；但若用户原有的 snell-server.service（或其他面板）还引用同一路径，
+    # 删掉会让别人的服务重启后起不来，此时保留并说明。
+    if svc_bin_referenced "$bin"; then
+        oc_warn "检测到其他 systemd 服务仍引用 $bin（可能是你原有的 Snell 服务），保留不删"
+    elif oc_confirm "同时删除 snell-server 二进制 $bin ？" y; then
         rm -f -- "$bin" && oc_ok "已删除 $bin"
     fi
     if [[ -n "$dir" && "$dir" == "${OC_ROOT}/"* && -d "$dir" ]]; then

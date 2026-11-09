@@ -202,8 +202,26 @@ oc_title() {
     printf '\n%b%s%b\n' "$C_BOLD$C_C" "== $* ==" "$C_N"
 }
 
+# 终端显示宽度：CJK 一个字符占 2 列，printf 的 %-Ns 按字节补齐会对不齐。
+# GNU wc -L 能给出显示宽度（coreutils），没有该选项时退回字符数。
+oc_display_width() {
+    local s="$1" w
+    if w="$(printf '%s' "$s" | wc -L 2>/dev/null)"; then
+        w="${w//[[:space:]]/}"
+        if [[ "$w" =~ ^[0-9]+$ ]]; then
+            printf '%s' "$w"
+            return 0
+        fi
+    fi
+    printf '%s' "${#s}"
+}
+
 oc_kv() {
-    printf '  %b%-24s%b %s\n' "$C_DIM" "$1" "$C_N" "$2"
+    local label="$1" val="$2" w pad
+    w="$(oc_display_width "$label")"
+    pad=$((24 - w))
+    ((pad < 1)) && pad=1
+    printf '  %b%s%b%*s%s\n' "$C_DIM" "$label" "$C_N" "$pad" "" "$val"
 }
 
 # 确认：OC_YES=1 时直接按默认值返回
@@ -261,7 +279,7 @@ oc_menu() {
     for i in "${!items[@]}"; do
         printf '  %b%2d%b) %s\n' "$C_C" "$((i + 1))" "$C_N" "${items[$i]}" >&2
     done
-    printf '  %b%2d%b) %s\n' "$C_C" 0 "$C_N" "返回" >&2
+    printf '  %b%2d%b) %s\n' "$C_C" 0 "$C_N" "${OC_MENU_ZERO_LABEL:-返回}" >&2
     while true; do
         printf '%b请选择 [0-%d]: %b' "$C_Y" "${#items[@]}" "$C_N" >&2
         if ! read -r sel; then return 1; fi
@@ -1964,6 +1982,20 @@ svc_logs() {
     journalctl -u "$unit" -n "$lines" --no-pager -o cat 2>/dev/null || true
 }
 
+# 二进制是否仍被"非 OneClick"的 systemd 单元引用（例如 x-ui 也用 /usr/local/bin/xray，
+# 用户原有 snell-server.service 也用 /usr/local/bin/snell-server）。卸载时用它决定删不删。
+svc_bin_referenced() {
+    local bin="$1" f
+    [[ -n "$bin" && -e "$bin" ]] || return 1
+    for f in /etc/systemd/system/*.service /lib/systemd/system/*.service /usr/lib/systemd/system/*.service; do
+        [[ -f "$f" ]] || continue
+        case "$(basename -- "$f")" in oneclick-*) continue ;; esac
+        grep -qF -- "$bin" "$f" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+
 # ===== src/lib/share.sh =====
 # lib/share.sh —— 分享链接与订阅产物（Clash / Surge / sing-box / URI / 二维码）
 #
@@ -2407,8 +2439,7 @@ ocp_vless_reality_cfg_write() {
             outbounds: [
                 {protocol: "freedom", tag: "direct"},
                 {protocol: "blackhole", tag: "block"}
-            ],
-            routing: {rules: [{type: "field", ip: ["geoip:private"], outboundTag: "block"}]}
+            ]
         }' > "$tmp"; then
         rm -f "$tmp"
         oc_err "生成 Xray 配置失败（jq 出错）"
@@ -2454,10 +2485,11 @@ proto_vless_reality_install() {
     os_detect
 
     if db_has "$key"; then
-        if [[ "$OC_YES" == "1" ]]; then
+        if ! db_is_installed "$key"; then
+            oc_warn "检测到上次未完成的 VLESS-Reality 安装（配置残留），本次将覆盖"
+        elif [[ "$OC_YES" == "1" ]]; then
             oc_die "VLESS-Reality 已安装（--yes 模式不覆盖；请先 --uninstall）"
-        fi
-        if ! oc_confirm "VLESS-Reality 已安装，是否重新安装（覆盖配置）？" n; then
+        elif ! oc_confirm "VLESS-Reality 已安装，是否重新安装（覆盖配置）？" n; then
             oc_info "已取消安装"
             return 0
         fi
@@ -2465,6 +2497,9 @@ proto_vless_reality_install() {
 
     oc_title "安装 VLESS-Reality"
     os_dep_install base || oc_die "系统依赖安装失败"
+
+    # 端口先判（443 通常独占），避免下载完才发现被占用
+    port="$(ocp_vless_reality_port)" || return 1
 
     bin="$OC_BIN_DIR/xray"
     if [[ -x "$bin" ]] && "$bin" version >/dev/null 2>&1; then
@@ -2505,7 +2540,6 @@ proto_vless_reality_install() {
         oc_ok "xray 已安装：$("$bin" version 2>/dev/null | head -n1)"
     fi
 
-    port="$(ocp_vless_reality_port)" || return 1
     uuid="$(os_uuid)"
     sid="$(os_random_hex 4)"
     sid="${sid:0:8}"
@@ -2600,7 +2634,9 @@ proto_vless_reality_uninstall() {
     oc_ok "已停止并移除服务：$unit"
 
     bin="$OC_BIN_DIR/xray"
-    if [[ "$OC_YES" != "1" ]] && oc_confirm "同时删除 xray 二进制 $bin ？" n; then
+    if svc_bin_referenced "$bin"; then
+        oc_warn "检测到其他 systemd 服务仍在引用 $bin（如 x-ui），保留不删"
+    elif [[ "$OC_YES" != "1" ]] && oc_confirm "同时删除 xray 二进制 $bin ？" n; then
         rm -f "$bin"
         oc_ok "已删除 $bin"
     fi
@@ -2984,18 +3020,31 @@ proto_hysteria2_install() {
     oc_require_root
     [[ -n "${OC_ARCH:-}" ]] || os_detect
 
-    # 1. 判重
+    # 1. 判重：以 installed 登记为准，只有残留配置视为上次未完成
     if db_has hysteria2; then
-        if [[ "${OC_YES:-0}" == "1" ]]; then
+        if ! db_is_installed hysteria2; then
+            oc_warn "检测到上次未完成的 Hysteria2 安装（配置残留），本次将覆盖"
+        elif [[ "${OC_YES:-0}" == "1" ]]; then
             oc_die "Hysteria2 已安装；非交互模式不覆盖，请先卸载后重装"
-        fi
-        oc_confirm "Hysteria2 已安装，是否重新安装（覆盖配置）？" n || {
+        elif ! oc_confirm "Hysteria2 已安装，是否重新安装（覆盖配置）？" n; then
             oc_info "已取消"
             return 0
-        }
+        fi
     fi
 
-    # 2. 依赖与二进制
+    # 2. 端口（UDP，先判占用再下载，避免白下几十 MB）
+    defport="$(ocp_hy2_default_port)"
+    port="${OC_ARG_PORT:-}"
+    if [[ -z "$port" ]]; then
+        port="$(oc_ask "Hysteria2 监听端口（UDP）" "$defport")"
+    fi
+    ocp_hy2_port_ok "$port" || oc_die "端口无效：${port:-空}（需 1-65535）"
+    port=$((10#$port))
+    if net_port_in_use "$port" udp; then
+        oc_die "UDP 端口 ${port} 已被占用；建议改用空闲端口：$(net_port_pick 8443 udp)"
+    fi
+
+    # 3. 依赖与二进制
     arch="$(ocp_hy2_arch)" || oc_die "Hysteria2 不支持当前架构：${OC_ARCH:-未知}（支持 amd64/arm64/armv7l/i386）"
     os_dep_install base || oc_die "基础依赖安装失败，无法继续"
 
@@ -3017,18 +3066,6 @@ proto_hysteria2_install() {
     rm -f -- "$tmpbin"
     oc_ok "二进制已安装：${OC_BIN_DIR}/hysteria"
 
-    # 3. 端口（UDP）
-    defport="$(ocp_hy2_default_port)"
-    port="${OC_ARG_PORT:-}"
-    if [[ -z "$port" ]]; then
-        port="$(oc_ask "Hysteria2 监听端口（UDP）" "$defport")"
-    fi
-    ocp_hy2_port_ok "$port" || oc_die "端口无效：${port:-空}（需 1-65535）"
-    port=$((10#$port))
-    if net_port_in_use "$port" udp; then
-        oc_die "UDP 端口 ${port} 已被占用；建议改用空闲端口：$(net_port_pick 8443 udp)"
-    fi
-
     # 4. 证书（先拿证书，失败不写半截配置）
     mode="${OC_ARG_CERT_MODE:-}"
     if [[ -z "$mode" ]]; then
@@ -3049,8 +3086,6 @@ proto_hysteria2_install() {
     if [[ -z "$crt_file" || -z "$key_file" || ! -f "$crt_file" || ! -f "$key_file" ]]; then
         oc_die "证书文件缺失（cert=${crt_file:-空} key=${key_file:-空}），安装已中止"
     fi
-    oc_ok "证书就绪：${crt_file}（SNI=${sni}）"
-
     # 5. 凭据
     pw="$(os_random_token 16)"
     if [[ ${#pw} -lt 16 ]]; then
@@ -3178,7 +3213,9 @@ proto_hysteria2_uninstall() {
     if [[ -n "$dir" && "$dir" == "${OC_ROOT}/"* && -d "$dir" ]]; then
         rm -rf -- "$dir"
     fi
-    if oc_confirm "同时删除二进制 ${OC_BIN_DIR}/hysteria？" n; then
+    if svc_bin_referenced "${OC_BIN_DIR}/hysteria"; then
+        oc_warn "检测到其他 systemd 服务仍在引用 ${OC_BIN_DIR}/hysteria，保留不删"
+    elif oc_confirm "同时删除二进制 ${OC_BIN_DIR}/hysteria？" n; then
         rm -f -- "${OC_BIN_DIR}/hysteria"
     fi
     db_unmark_installed hysteria2
@@ -3546,20 +3583,30 @@ proto_snell_install() {
     oc_require_root
     [[ -n "${OC_ARCH:-}" ]] || os_detect
 
-    # 1. 判重：状态库里有记录就要求确认（OC_YES=1 直接失败，避免脚本化误覆盖）
+    # 1. 判重：以 installed 登记为准，只有残留配置视为上次未完成
     if db_has snell; then
-        if [[ "${OC_YES:-0}" == "1" ]]; then
+        if ! db_is_installed snell; then
+            oc_warn "检测到上次未完成的 Snell 安装（配置残留），本次将覆盖"
+        elif [[ "${OC_YES:-0}" == "1" ]]; then
             oc_die "Snell v6 已安装；非交互模式不覆盖，请先卸载（oneclick --uninstall snell --yes）"
-        fi
-        oc_confirm "Snell v6 已安装，是否重新安装（覆盖配置）？" n || {
+        elif ! oc_confirm "Snell v6 已安装，是否重新安装（覆盖配置）？" n; then
             oc_info "已取消"
             return 0
-        }
+        fi
     fi
 
     oc_title "安装 Snell v6"
 
-    # 2. 依赖：Snell 是 zip 包，base 里的 unzip 已够用（dl_unzip 还会兜底安装）
+    # 2. 残留清理与端口：先清上次中断留下的 unit（否则它自己的监听会被当成别人占用），
+    #    再判端口，最后才下载，避免白下 10MB 才发现端口不可用。
+    unit="$(ocp_snell_unit)"
+    if ! db_has snell && [[ "$(svc_status "$unit")" != "not-found" ]]; then
+        oc_warn "发现上次安装残留的 systemd 单元 $unit，先清理"
+        svc_remove "$unit"
+    fi
+    port="$(ocp_snell_ask_port)" || return 1
+
+    # 3. 依赖：Snell 是 zip 包，base 里的 unzip 已够用（dl_unzip 还会兜底安装）
     os_dep_install base || oc_die "基础依赖安装失败，无法继续"
 
     arch="$(ocp_snell_dl_arch "${OC_ARCH:-}")" || return 1
@@ -3568,8 +3615,12 @@ proto_snell_install() {
     # 已装同主版本的二进制就复用，省一次 10MB 下载；主版本不是 6（比如上游脚本装的 v4）必须覆盖，
     # 否则配置里的 mode 会被老版本当成未知键，链接声称 v6 实际却是 v4。
     if [[ -x "$bin" ]]; then
-        cur="$("$bin" --version 2>/dev/null | head -n1 || true)"
-        cur="$(printf '%s' "$cur" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)"
+        # snell-server 把版本打到 stderr（[server_main] <NOTIFY> ...），必须合流才能读到
+        cur="$("$bin" --version 2>&1 | head -n1 || true)"
+        # 输出形如 "2026-11-09 00:02:34.504121 ... snell-server v6.0.0"，直接抓数字会先命中
+        # 时间戳里的小数（34.504121），所以只认 v 前缀的版本号。
+        cur="$(printf '%s' "$cur" | grep -oE 'v[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)"
+        cur="${cur#v}"
         if [[ "${cur%%.*}" == "6" ]]; then
             ver="$cur"
             oc_ok "复用已安装的 snell-server ${cur}：$bin"
@@ -3608,16 +3659,7 @@ proto_snell_install() {
         oc_ok "snell-server v${ver} 已安装：$bin"
     fi
 
-    # 3. 上次安装中断可能留下 unit 而状态库没有记录：先清掉，
-    #    否则下面的端口占用检查会把自己上一次的监听当成别人的端口。
-    unit="$(ocp_snell_unit)"
-    if ! db_has snell && [[ "$(svc_status "$unit")" != "not-found" ]]; then
-        oc_warn "发现上次安装残留的 systemd 单元 $unit，先清理"
-        svc_remove "$unit"
-    fi
-
-    # 4. 端口与凭据
-    port="$(ocp_snell_ask_port)" || return 1
+    # 4. 凭据
     psk="$(ocp_snell_psk)" || oc_die "生成 PSK 失败（os_random_token / openssl 不可用？）"
     [[ -n "$psk" ]] || oc_die "PSK 为空，已中止"
 
@@ -3702,8 +3744,11 @@ proto_snell_uninstall() {
         net_fw_deny "$port" tcp "$(ocp_snell_tag)" >/dev/null 2>&1 ||
             oc_warn "撤销 TCP/${port} 放行失败，请手动检查"
     fi
-    # snell-server 只服务本协议，默认一并删除（OC_YES=1 也按默认 yes 删，避免留孤儿可执行文件）
-    if oc_confirm "同时删除 snell-server 二进制 $bin ？" y; then
+    # 默认一并删除；但若用户原有的 snell-server.service（或其他面板）还引用同一路径，
+    # 删掉会让别人的服务重启后起不来，此时保留并说明。
+    if svc_bin_referenced "$bin"; then
+        oc_warn "检测到其他 systemd 服务仍引用 $bin（可能是你原有的 Snell 服务），保留不删"
+    elif oc_confirm "同时删除 snell-server 二进制 $bin ？" y; then
         rm -f -- "$bin" && oc_ok "已删除 $bin"
     fi
     if [[ -n "$dir" && "$dir" == "${OC_ROOT}/"* && -d "$dir" ]]; then
@@ -4352,15 +4397,16 @@ proto_ss_rust_install() {
     oc_require_root
     [[ -n "${OC_ARCH:-}" ]] || os_detect
 
-    # 1. 判重：有记录就要求确认；OC_YES=1 直接失败，避免脚本化误覆盖
+    # 1. 判重：以 installed 登记为准，只有残留配置视为上次未完成
     if db_has ss_rust; then
-        if [[ "${OC_YES:-0}" == "1" ]]; then
+        if ! db_is_installed ss_rust; then
+            oc_warn "检测到上次未完成的 SS-Rust 安装（配置残留），本次将覆盖"
+        elif [[ "${OC_YES:-0}" == "1" ]]; then
             oc_die "SS-Rust 已安装；非交互模式不覆盖，请先卸载（oneclick --uninstall ss_rust --yes）"
-        fi
-        oc_confirm "SS-Rust 已安装，是否重新安装（覆盖配置）？" n || {
+        elif ! oc_confirm "SS-Rust 已安装，是否重新安装（覆盖配置）？" n; then
             oc_info "已取消"
             return 0
-        }
+        fi
     fi
 
     oc_title "安装 SS-Rust"
@@ -4381,7 +4427,10 @@ proto_ss_rust_install() {
         fi
     fi
 
-    # 3. 依赖：.tar.xz 需要 xz，base 里没有，先补
+    # 3. 端口：先判占用（ss 的 tcp 与可选 udp），避免下载完才发现不可用
+    port="$(ocp_ssrust_ask_port)" || return 1
+
+    # 4. 依赖：.tar.xz 需要 xz，base 里没有，先补
     os_dep_install base || oc_die "基础依赖安装失败，无法继续"
     ocp_ssrust_ensure_xz || oc_die "缺少 xz，无法解开 .tar.xz；请手动安装 xz 后重试"
     # 架构先判（ss 与 shadow-tls 的支持面不同，早判早报错）
@@ -4394,6 +4443,7 @@ proto_ss_rust_install() {
     if [[ -z "$ver" ]]; then
         ver="$(dl_latest_tag shadowsocks/shadowsocks-rust)"
     fi
+    ver="${ver#v}"   # dl_latest_tag 返回原始 tag（v1.25.0），拼 URL 由本函数补 v
     if [[ -z "$ver" ]]; then
         ver="$OC_SSRUST_FALLBACK_VER"
         oc_warn "取不到最新版本号（GitHub API 限流？），回退到已知版本 v${ver}"
@@ -4408,7 +4458,6 @@ proto_ss_rust_install() {
     fi
 
     # 5. 端口与凭据
-    port="$(ocp_ssrust_ask_port)" || return 1
     method="$(ocp_ssrust_pick_method)" || return 1
     password="$(db_get ss_rust password "")"
     if ! ocp_ssrust_pw_ok "$method" "$password"; then
@@ -4447,6 +4496,7 @@ proto_ss_rust_install() {
         else
             stver="${OC_SSRUST_STLS_VER:-}"
             [[ -z "$stver" ]] && stver="$(dl_latest_tag ihciah/shadow-tls)"
+            stver="${stver#v}"   # 同上：统一去掉 tag 的 v 前缀
             if [[ -z "$stver" ]]; then
                 stver="$OC_SSRUST_STLS_FALLBACK_VER"
                 oc_warn "取不到 ShadowTLS 最新版本号，回退到已知版本 v${stver}"
@@ -4612,7 +4662,9 @@ proto_ss_rust_uninstall() {
         net_fw_deny "$stls_port" tcp "$(ocp_ssrust_stls_tag)" >/dev/null 2>&1 || true
     fi
     # 两个二进制都只服务本协议，默认删除（OC_YES=1 按默认 yes 删，避免留孤儿）
-    if oc_confirm "同时删除 ssserver 与 shadow-tls 二进制？" y; then
+    if svc_bin_referenced "$(ocp_ssrust_bin)" || svc_bin_referenced "$(ocp_ssrust_stls_bin)"; then
+        oc_warn "检测到其他 systemd 服务仍在引用 ssserver/shadow-tls，保留不删"
+    elif oc_confirm "同时删除 ssserver 与 shadow-tls 二进制？" y; then
         rm -f -- "$(ocp_ssrust_bin)" && oc_ok "已删除 $(ocp_ssrust_bin)"
         rm -f -- "$(ocp_ssrust_stls_bin)" && oc_ok "已删除 $(ocp_ssrust_stls_bin)"
     fi
@@ -5124,18 +5176,30 @@ proto_anytls_install() {
     oc_require_root
     [[ -n "${OC_ARCH:-}" ]] || os_detect
 
-    # 1. 判重
-    if db_is_installed anytls || db_has anytls; then
-        if [[ "${OC_YES:-0}" == "1" ]]; then
+    # 1. 判重：以 installed 登记为准，只有残留配置视为上次未完成
+    if db_has anytls; then
+        if ! db_is_installed anytls; then
+            oc_warn "检测到上次未完成的 AnyTLS 安装（配置残留），本次将覆盖"
+        elif [[ "${OC_YES:-0}" == "1" ]]; then
             oc_die "AnyTLS 已安装；非交互模式不覆盖，请先卸载后重装"
-        fi
-        oc_confirm "AnyTLS 已安装，是否重新安装（覆盖配置）？" n || {
+        elif ! oc_confirm "AnyTLS 已安装，是否重新安装（覆盖配置）？" n; then
             oc_info "已取消"
             return 0
-        }
+        fi
     fi
 
-    # 2. 依赖与二进制（sing-box 复用，版本不一致才重下）
+    # 2. 端口（TCP，先判占用再下载）
+    port="${OC_ARG_PORT:-}"
+    if [[ -z "$port" ]]; then
+        port="$(oc_ask "AnyTLS 监听端口" "$(ocp_anytls_default_port)")"
+    fi
+    ocp_anytls_port_ok "$port" || oc_die "端口无效：${port:-空}（需 1-65535）"
+    port=$((10#$port))
+    if net_port_in_use "$port" tcp; then
+        oc_die "TCP 端口 ${port} 已被占用；建议改用空闲端口：$(net_port_pick 8443 tcp)"
+    fi
+
+    # 3. 依赖与二进制（sing-box 复用，版本不一致才重下）
     case "${OC_ARCH:-}" in
         amd64|arm64|armv7l) ;;
         i386) oc_die "AnyTLS 不支持 i386（sing-box 未提供 linux-386 构建）" ;;
@@ -5155,17 +5219,6 @@ proto_anytls_install() {
         have="$(ocp_anytls_sb_version || true)"
         [[ -n "$have" ]] || oc_die "sing-box 已落盘但无法执行（架构不匹配或缺少依赖），请检查 $(ocp_anytls_bin)"
         oc_ok "sing-box 已安装：$(ocp_anytls_bin)（${have}）"
-    fi
-
-    # 3. 端口（TCP）
-    port="${OC_ARG_PORT:-}"
-    if [[ -z "$port" ]]; then
-        port="$(oc_ask "AnyTLS 监听端口" "$(ocp_anytls_default_port)")"
-    fi
-    ocp_anytls_port_ok "$port" || oc_die "端口无效：${port:-空}（需 1-65535）"
-    port=$((10#$port))
-    if net_port_in_use "$port" tcp; then
-        oc_die "TCP 端口 ${port} 已被占用；建议改用空闲端口：$(net_port_pick 8443 tcp)"
     fi
 
     # 4. 证书（先拿证书，失败不写半截配置）
@@ -5188,8 +5241,6 @@ proto_anytls_install() {
     if [[ -z "$crt_file" || -z "$key_file" || ! -f "$crt_file" || ! -f "$key_file" ]]; then
         oc_die "证书文件缺失（cert=${crt_file:-空} key=${key_file:-空}），安装已中止"
     fi
-    oc_ok "证书就绪：${crt_file}（SNI=${sni}）"
-
     # 5. 凭据
     pw="$(os_random_token 16)"
     if [[ ${#pw} -lt 16 ]]; then
@@ -5847,6 +5898,7 @@ main_menu() {
     while true; do
         oc_banner
         local c
+        OC_MENU_ZERO_LABEL="退出"
         c="$(oc_menu "主菜单" \
             "安装协议" \
             "节点管理" \
@@ -5865,6 +5917,7 @@ main_menu() {
             6) menu_backup ;;
             7) menu_update ;;
         esac
+        unset OC_MENU_ZERO_LABEL
     done
 }
 

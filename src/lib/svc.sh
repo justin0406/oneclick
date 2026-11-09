@@ -71,3 +71,17 @@ svc_logs() {
     local unit="$1" lines="${2:-30}"
     journalctl -u "$unit" -n "$lines" --no-pager -o cat 2>/dev/null || true
 }
+
+# 二进制是否仍被"非 OneClick"的 systemd 单元引用（例如 x-ui 也用 /usr/local/bin/xray，
+# 用户原有 snell-server.service 也用 /usr/local/bin/snell-server）。卸载时用它决定删不删。
+svc_bin_referenced() {
+    local bin="$1" f
+    [[ -n "$bin" && -e "$bin" ]] || return 1
+    for f in /etc/systemd/system/*.service /lib/systemd/system/*.service /usr/lib/systemd/system/*.service; do
+        [[ -f "$f" ]] || continue
+        case "$(basename -- "$f")" in oneclick-*) continue ;; esac
+        grep -qF -- "$bin" "$f" 2>/dev/null && return 0
+    done
+    return 1
+}
+

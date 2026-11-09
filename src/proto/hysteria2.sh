@@ -175,18 +175,31 @@ proto_hysteria2_install() {
     oc_require_root
     [[ -n "${OC_ARCH:-}" ]] || os_detect
 
-    # 1. 判重
+    # 1. 判重：以 installed 登记为准，只有残留配置视为上次未完成
     if db_has hysteria2; then
-        if [[ "${OC_YES:-0}" == "1" ]]; then
+        if ! db_is_installed hysteria2; then
+            oc_warn "检测到上次未完成的 Hysteria2 安装（配置残留），本次将覆盖"
+        elif [[ "${OC_YES:-0}" == "1" ]]; then
             oc_die "Hysteria2 已安装；非交互模式不覆盖，请先卸载后重装"
-        fi
-        oc_confirm "Hysteria2 已安装，是否重新安装（覆盖配置）？" n || {
+        elif ! oc_confirm "Hysteria2 已安装，是否重新安装（覆盖配置）？" n; then
             oc_info "已取消"
             return 0
-        }
+        fi
     fi
 
-    # 2. 依赖与二进制
+    # 2. 端口（UDP，先判占用再下载，避免白下几十 MB）
+    defport="$(ocp_hy2_default_port)"
+    port="${OC_ARG_PORT:-}"
+    if [[ -z "$port" ]]; then
+        port="$(oc_ask "Hysteria2 监听端口（UDP）" "$defport")"
+    fi
+    ocp_hy2_port_ok "$port" || oc_die "端口无效：${port:-空}（需 1-65535）"
+    port=$((10#$port))
+    if net_port_in_use "$port" udp; then
+        oc_die "UDP 端口 ${port} 已被占用；建议改用空闲端口：$(net_port_pick 8443 udp)"
+    fi
+
+    # 3. 依赖与二进制
     arch="$(ocp_hy2_arch)" || oc_die "Hysteria2 不支持当前架构：${OC_ARCH:-未知}（支持 amd64/arm64/armv7l/i386）"
     os_dep_install base || oc_die "基础依赖安装失败，无法继续"
 
@@ -208,18 +221,6 @@ proto_hysteria2_install() {
     rm -f -- "$tmpbin"
     oc_ok "二进制已安装：${OC_BIN_DIR}/hysteria"
 
-    # 3. 端口（UDP）
-    defport="$(ocp_hy2_default_port)"
-    port="${OC_ARG_PORT:-}"
-    if [[ -z "$port" ]]; then
-        port="$(oc_ask "Hysteria2 监听端口（UDP）" "$defport")"
-    fi
-    ocp_hy2_port_ok "$port" || oc_die "端口无效：${port:-空}（需 1-65535）"
-    port=$((10#$port))
-    if net_port_in_use "$port" udp; then
-        oc_die "UDP 端口 ${port} 已被占用；建议改用空闲端口：$(net_port_pick 8443 udp)"
-    fi
-
     # 4. 证书（先拿证书，失败不写半截配置）
     mode="${OC_ARG_CERT_MODE:-}"
     if [[ -z "$mode" ]]; then
@@ -240,8 +241,6 @@ proto_hysteria2_install() {
     if [[ -z "$crt_file" || -z "$key_file" || ! -f "$crt_file" || ! -f "$key_file" ]]; then
         oc_die "证书文件缺失（cert=${crt_file:-空} key=${key_file:-空}），安装已中止"
     fi
-    oc_ok "证书就绪：${crt_file}（SNI=${sni}）"
-
     # 5. 凭据
     pw="$(os_random_token 16)"
     if [[ ${#pw} -lt 16 ]]; then
@@ -369,7 +368,9 @@ proto_hysteria2_uninstall() {
     if [[ -n "$dir" && "$dir" == "${OC_ROOT}/"* && -d "$dir" ]]; then
         rm -rf -- "$dir"
     fi
-    if oc_confirm "同时删除二进制 ${OC_BIN_DIR}/hysteria？" n; then
+    if svc_bin_referenced "${OC_BIN_DIR}/hysteria"; then
+        oc_warn "检测到其他 systemd 服务仍在引用 ${OC_BIN_DIR}/hysteria，保留不删"
+    elif oc_confirm "同时删除二进制 ${OC_BIN_DIR}/hysteria？" n; then
         rm -f -- "${OC_BIN_DIR}/hysteria"
     fi
     db_unmark_installed hysteria2

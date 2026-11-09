@@ -439,6 +439,7 @@ main_menu() {
     while true; do
         oc_banner
         local c
+        OC_MENU_ZERO_LABEL="退出"
         c="$(oc_menu "主菜单" \
             "安装协议" \
             "节点管理" \
@@ -457,6 +458,7 @@ main_menu() {
             6) menu_backup ;;
             7) menu_update ;;
         esac
+        unset OC_MENU_ZERO_LABEL
     done
 }
 

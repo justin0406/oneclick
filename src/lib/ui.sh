@@ -20,8 +20,26 @@ oc_title() {
     printf '\n%b%s%b\n' "$C_BOLD$C_C" "== $* ==" "$C_N"
 }
 
+# 终端显示宽度：CJK 一个字符占 2 列，printf 的 %-Ns 按字节补齐会对不齐。
+# GNU wc -L 能给出显示宽度（coreutils），没有该选项时退回字符数。
+oc_display_width() {
+    local s="$1" w
+    if w="$(printf '%s' "$s" | wc -L 2>/dev/null)"; then
+        w="${w//[[:space:]]/}"
+        if [[ "$w" =~ ^[0-9]+$ ]]; then
+            printf '%s' "$w"
+            return 0
+        fi
+    fi
+    printf '%s' "${#s}"
+}
+
 oc_kv() {
-    printf '  %b%-24s%b %s\n' "$C_DIM" "$1" "$C_N" "$2"
+    local label="$1" val="$2" w pad
+    w="$(oc_display_width "$label")"
+    pad=$((24 - w))
+    ((pad < 1)) && pad=1
+    printf '  %b%s%b%*s%s\n' "$C_DIM" "$label" "$C_N" "$pad" "" "$val"
 }
 
 # 确认：OC_YES=1 时直接按默认值返回
@@ -79,7 +97,7 @@ oc_menu() {
     for i in "${!items[@]}"; do
         printf '  %b%2d%b) %s\n' "$C_C" "$((i + 1))" "$C_N" "${items[$i]}" >&2
     done
-    printf '  %b%2d%b) %s\n' "$C_C" 0 "$C_N" "返回" >&2
+    printf '  %b%2d%b) %s\n' "$C_C" 0 "$C_N" "${OC_MENU_ZERO_LABEL:-返回}" >&2
     while true; do
         printf '%b请选择 [0-%d]: %b' "$C_Y" "${#items[@]}" "$C_N" >&2
         if ! read -r sel; then return 1; fi

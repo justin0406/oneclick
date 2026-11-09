@@ -191,18 +191,30 @@ proto_anytls_install() {
     oc_require_root
     [[ -n "${OC_ARCH:-}" ]] || os_detect
 
-    # 1. 判重
-    if db_is_installed anytls || db_has anytls; then
-        if [[ "${OC_YES:-0}" == "1" ]]; then
+    # 1. 判重：以 installed 登记为准，只有残留配置视为上次未完成
+    if db_has anytls; then
+        if ! db_is_installed anytls; then
+            oc_warn "检测到上次未完成的 AnyTLS 安装（配置残留），本次将覆盖"
+        elif [[ "${OC_YES:-0}" == "1" ]]; then
             oc_die "AnyTLS 已安装；非交互模式不覆盖，请先卸载后重装"
-        fi
-        oc_confirm "AnyTLS 已安装，是否重新安装（覆盖配置）？" n || {
+        elif ! oc_confirm "AnyTLS 已安装，是否重新安装（覆盖配置）？" n; then
             oc_info "已取消"
             return 0
-        }
+        fi
     fi
 
-    # 2. 依赖与二进制（sing-box 复用，版本不一致才重下）
+    # 2. 端口（TCP，先判占用再下载）
+    port="${OC_ARG_PORT:-}"
+    if [[ -z "$port" ]]; then
+        port="$(oc_ask "AnyTLS 监听端口" "$(ocp_anytls_default_port)")"
+    fi
+    ocp_anytls_port_ok "$port" || oc_die "端口无效：${port:-空}（需 1-65535）"
+    port=$((10#$port))
+    if net_port_in_use "$port" tcp; then
+        oc_die "TCP 端口 ${port} 已被占用；建议改用空闲端口：$(net_port_pick 8443 tcp)"
+    fi
+
+    # 3. 依赖与二进制（sing-box 复用，版本不一致才重下）
     case "${OC_ARCH:-}" in
         amd64|arm64|armv7l) ;;
         i386) oc_die "AnyTLS 不支持 i386（sing-box 未提供 linux-386 构建）" ;;
@@ -222,17 +234,6 @@ proto_anytls_install() {
         have="$(ocp_anytls_sb_version || true)"
         [[ -n "$have" ]] || oc_die "sing-box 已落盘但无法执行（架构不匹配或缺少依赖），请检查 $(ocp_anytls_bin)"
         oc_ok "sing-box 已安装：$(ocp_anytls_bin)（${have}）"
-    fi
-
-    # 3. 端口（TCP）
-    port="${OC_ARG_PORT:-}"
-    if [[ -z "$port" ]]; then
-        port="$(oc_ask "AnyTLS 监听端口" "$(ocp_anytls_default_port)")"
-    fi
-    ocp_anytls_port_ok "$port" || oc_die "端口无效：${port:-空}（需 1-65535）"
-    port=$((10#$port))
-    if net_port_in_use "$port" tcp; then
-        oc_die "TCP 端口 ${port} 已被占用；建议改用空闲端口：$(net_port_pick 8443 tcp)"
     fi
 
     # 4. 证书（先拿证书，失败不写半截配置）
@@ -255,8 +256,6 @@ proto_anytls_install() {
     if [[ -z "$crt_file" || -z "$key_file" || ! -f "$crt_file" || ! -f "$key_file" ]]; then
         oc_die "证书文件缺失（cert=${crt_file:-空} key=${key_file:-空}），安装已中止"
     fi
-    oc_ok "证书就绪：${crt_file}（SNI=${sni}）"
-
     # 5. 凭据
     pw="$(os_random_token 16)"
     if [[ ${#pw} -lt 16 ]]; then

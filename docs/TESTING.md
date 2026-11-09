@@ -125,3 +125,35 @@ nft list ruleset 2>/dev/null | grep -c oneclick || iptables-save | grep -c onecl
 日志：systemctl status oneclick-snell --no-pager; journalctl -u oneclick-snell -n 50 --no-pager -o cat
 系统：Debian 13 / x86_64 / 仅本脚本
 ```
+
+## 10. VPS 回归要点（2026-11-09 实测新增）
+
+在真实 Debian 13 / x86_64 上跑完整流程后，额外覆盖这几条：
+
+```bash
+# 10.1 端口冲突必须在下载之前失败（不应看到 "正在下载" 字样）
+time oneclick --install snell --port 22 --yes
+
+# 10.2 半成品状态可自愈：删掉 installed 登记但保留配置，再装应提示"上次未完成"并继续
+jq 'del(.vless_reality)' /etc/oneclick/db.json > /tmp/db && mv /tmp/db /etc/oneclick/db.json
+oneclick --install vless_reality --port 443 --yes
+
+# 10.3 与他人共用的二进制不会被误删：本机已有 snell-server.service 时卸载本脚本的 snell
+ls -l /usr/local/bin/snell-server      # 卸载后应仍在，且系统服务照常运行
+systemctl is-active snell-server
+
+# 10.4 snell-server 已存在时重装应"复用"下载（不重新下载）
+oneclick --uninstall snell --yes && oneclick --install snell --port 12345 --yes   # 期望：复用已安装的 snell-server
+
+# 10.5 重装后重启机器，五个 unit 全部自启
+systemctl is-enabled oneclick-vless-reality oneclick-hysteria2 oneclick-snell oneclick-ss-rust oneclick-anytls
+
+# 10.6 订阅产物必须是 600，且四种格式齐全
+stat -c '%a %n' /etc/oneclick/sub/* && oneclick --sub
+```
+
+已知行为（非 bug）：
+
+- `--yes` 重装已安装协议会直接失败并提示先 `--uninstall`，这是为了避免脚本化误覆盖
+- 自签证书（`--cert-mode self`）每次安装都会重签，客户端需要重新导入 `insecure` 链接
+- AnyTLS 卸载保留 sing-box 二进制，VLESS 卸载默认保留 xray（其它面板可能共用）
