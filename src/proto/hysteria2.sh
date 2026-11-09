@@ -80,17 +80,19 @@ ocp_hy2_fetch_bin() {
 
 # 写服务端 YAML（/etc/oneclick/hysteria2/config.yaml，600）；内容无变化时不重写
 ocp_hy2_write_config() {
-    local port="$1" pw="$2" cert="$3" key="$4" obfs="$5" obfs_pw="$6"
-    local dir cfg tmp epw eopw
+    local port="$1" pw="$2" cert="$3" key="$4" obfs="$5" obfs_pw="$6" hop="${7:-}"
+    local dir cfg tmp epw eopw listen
     dir="$(ocp_hy2_dir)"
     cfg="$(ocp_hy2_cfg)"
     epw="$(ocp_hy2_yaml_escape "$pw")"
     mkdir -p "$dir" || return 1
     chmod 700 "$dir" 2>/dev/null || true
     tmp="${cfg}.tmp.$$"
+    listen="$port"
+    [[ -n "$hop" ]] && listen="${port},${hop}"
     {
         cat <<EOF
-listen: :${port}
+listen: :${listen}
 
 auth:
   type: password
@@ -170,7 +172,7 @@ proto_hysteria2_meta() {
 
 proto_hysteria2_install() {
     local unit port defport mode sni_hint crt_file key_file sni pw obfs obfs_pw
-    local hop hop_start hop_end pubip tmpbin arch
+    local hop pubip tmpbin arch
 
     oc_require_root
     [[ -n "${OC_ARCH:-}" ]] || os_detect
@@ -259,7 +261,7 @@ proto_hysteria2_install() {
     fi
 
     hop=""
-    if oc_confirm "是否启用端口跳跃（UDP 端口段 DNAT 到主端口，可缓解 QoS 封锁）？" n; then
+    if oc_confirm "是否启用端口跳跃（UDP 端口段，由 hysteria 自身安排转发，停止时自动清理）？" n; then
         local hs he
         hs="$(oc_ask "端口段起始" 20000)"
         he="$(oc_ask "端口段结束" 30000)"
@@ -270,7 +272,7 @@ proto_hysteria2_install() {
     fi
 
     # 6. 写配置
-    ocp_hy2_write_config "$port" "$pw" "$crt_file" "$key_file" "$obfs" "$obfs_pw" ||
+    ocp_hy2_write_config "$port" "$pw" "$crt_file" "$key_file" "$obfs" "$obfs_pw" "$hop" ||
         oc_die "写入配置失败：$(ocp_hy2_cfg)"
     oc_ok "配置已写入：$(ocp_hy2_cfg)"
 
@@ -287,20 +289,7 @@ proto_hysteria2_install() {
     fi
     oc_ok "服务已启动：${unit}"
 
-    # 8. 防火墙与端口跳跃（先撤后加，保证重复执行不叠加规则）
-    net_fw_deny "$port" udp "oneclick-hysteria2" >/dev/null 2>&1 || true
-    net_fw_allow "$port" udp "oneclick-hysteria2" >/dev/null 2>&1 || oc_warn "防火墙放行 UDP ${port} 失败，请手动检查"
-    net_nat_hop_del hy2 >/dev/null 2>&1 || true
-    if [[ -n "$hop" ]]; then
-        hop_start="${hop%%-*}"
-        hop_end="${hop##*-}"
-        if net_nat_hop_add hy2 "$hop_start" "$hop_end" "$port" >/dev/null 2>&1; then
-            oc_ok "端口跳跃已启用：UDP ${hop} → ${port}"
-        else
-            oc_warn "端口跳跃规则添加失败，已回退为单端口模式"
-            hop=""
-        fi
-    fi
+    [[ -n "$hop" ]] && oc_ok "端口跳跃已启用：UDP ${hop}（转发规则由 hysteria 管理）"
 
     # 9. 落库
     db_set hysteria2 port "$port"
@@ -354,16 +343,12 @@ proto_hysteria2_uninstall() {
         oc_warn "Hysteria2 未安装"
         return 0
     fi
-    oc_confirm "确认卸载 Hysteria2（停止服务、删除配置与防火墙规则）？" y || {
+    oc_confirm "确认卸载 Hysteria2（停止服务并删除配置）？" y || {
         oc_info "已取消"
         return 0
     }
     port="$(db_get hysteria2 port "")"
     svc_remove "$unit"
-    if [[ -n "$port" ]]; then
-        net_fw_deny "$port" udp "oneclick-hysteria2" >/dev/null 2>&1 || oc_warn "撤销防火墙规则失败，请手动检查"
-    fi
-    net_nat_hop_del hy2 >/dev/null 2>&1 || true
     dir="$(ocp_hy2_dir)"
     if [[ -n "$dir" && "$dir" == "${OC_ROOT}/"* && -d "$dir" ]]; then
         rm -rf -- "$dir"
@@ -425,7 +410,7 @@ proto_hysteria2_link() {
 }
 
 proto_hysteria2_regen() {
-    local unit port pw sni crt_file key_file obfs obfs_pw hop hop_start hop_end
+    local unit port pw sni crt_file key_file obfs obfs_pw hop
     oc_require_root
     if ! db_is_installed hysteria2; then
         oc_die "Hysteria2 未安装，无法重生成配置"
@@ -446,7 +431,7 @@ proto_hysteria2_regen() {
     fi
     [[ "$obfs" == "salamander" ]] || obfs="off"
 
-    ocp_hy2_write_config "$port" "$pw" "$crt_file" "$key_file" "$obfs" "$obfs_pw" ||
+    ocp_hy2_write_config "$port" "$pw" "$crt_file" "$key_file" "$obfs" "$obfs_pw" "$hop" ||
         oc_die "写入配置失败：$(ocp_hy2_cfg)"
     ocp_hy2_write_unit
     unit="$(oc_unit_name hysteria2)"
@@ -459,14 +444,6 @@ proto_hysteria2_regen() {
         oc_die "配置重生成后启动失败"
     fi
 
-    # 端口可能变了：端口跳跃的 DNAT 目标要跟着更新
-    net_nat_hop_del hy2 >/dev/null 2>&1 || true
-    if [[ -n "$hop" ]]; then
-        hop_start="${hop%%-*}"
-        hop_end="${hop##*-}"
-        net_nat_hop_add hy2 "$hop_start" "$hop_end" "$port" >/dev/null 2>&1 ||
-            oc_warn "端口跳跃规则刷新失败，请重新执行安装以修复"
-    fi
     oc_ok "配置已重生成并重启：$(ocp_hy2_cfg)"
 }
 

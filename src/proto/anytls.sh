@@ -282,10 +282,6 @@ proto_anytls_install() {
     fi
     oc_ok "服务已启动：${unit}"
 
-    # 8. 防火墙
-    net_fw_deny "$port" tcp "oneclick-anytls" >/dev/null 2>&1 || true
-    net_fw_allow "$port" tcp "oneclick-anytls" >/dev/null 2>&1 || oc_warn "防火墙放行 TCP ${port} 失败，请手动检查"
-
     # 9. 落库（sing-box 二进制共享，卸载时保留）
     db_set anytls port "$port"
     db_set anytls password "$pw"
@@ -333,9 +329,6 @@ proto_anytls_uninstall() {
     }
     port="$(db_get anytls port "")"
     svc_remove "$unit"
-    if [[ -n "$port" ]]; then
-        net_fw_deny "$port" tcp "oneclick-anytls" >/dev/null 2>&1 || oc_warn "撤销防火墙规则失败，请手动检查"
-    fi
     dir="$(ocp_anytls_dir)"
     if [[ -n "$dir" && "$dir" == "${OC_ROOT}/"* && -d "$dir" ]]; then
         rm -rf -- "$dir"

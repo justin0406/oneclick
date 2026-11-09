@@ -54,13 +54,15 @@ sudo oc --link snell --format surge
 **证书自主签发。** 每个需要 TLS 的协议都支持三条路径：`existing`（粘贴已有证书）、`acme`（acme.sh HTTP-01）、
 `self`（EC P-256 + SAN 自签）。证书缺失时绝不静默生成随机证书，安装流程会停在证书步骤等你选择。
 
-**不碰不属于自己的东西。** 不清空 iptables/nft 整表、不 `chmod -R 777`、不改系统 SSH 配置；
-防火墙规则只增删带 `oneclick-` 注释的条目，nft 使用独立的 `inet oneclick` 表。
+**不碰不属于自己的东西。** 完全不改防火墙：不写 iptables / nftables / firewalld / ufw 规则，
+端口可达性由你自己的防火墙策略决定；也不 `chmod -R 777`、不改系统 SSH 配置、不调 sysctl。
+唯一例外：启用 Hysteria2 端口跳跃时，由 hysteria 自己按其 `listen` 端口段安装并清理转发规则。
 
 **下载可验证。** 所有二进制走统一下载层：3 次重试、可选镜像前缀（`OC_GH_PROXY`）、有 SHA256 则校验、
 失败自动回滚，不留下半截文件。
 
 **卸载即卸载。** 停止服务、取消开机自启、删除 unit 并 `daemon-reload`，配置与证书单独确认是否保留。
+`oneclick --purge` 会清掉脚本创建的一切，且必须手动输入 `PURGE` 才执行。
 
 **单用户。** 不做多用户、流量统计、到期时间、Telegram 机器人 —— 这些交给面板，本脚本只负责把单机代理装好、管好。
 

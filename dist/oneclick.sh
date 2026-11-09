@@ -20,8 +20,6 @@ OC_BIN_DIR="${OC_BIN_DIR:-$OC_BIN_ROOT/bin}"
 OC_ENTRY_DIR="${OC_ENTRY_DIR:-/usr/local/bin}"
 OC_ENTRY="$OC_ENTRY_DIR/oneclick"
 OC_UNIT_DIR="${OC_UNIT_DIR:-/etc/systemd/system}"
-OC_FW_FILE="$OC_ROOT/firewall.sh"
-OC_FW_UNIT="oneclick-firewall"
 
 OC_OS_ID=""
 OC_OS_VER=""
@@ -517,13 +515,11 @@ dl_untar() {
 }
 
 # ===== src/lib/net.sh =====
-# lib/net.sh —— 公网 IP / 端口占用 / 防火墙四后端 / BBR+TFO / UDP 端口跳跃
+# lib/net.sh —— 公网 IP 探测 / 端口占用检查
 #
-# 防火墙纪律（SPEC §6）：只增删本脚本自己的规则，绝不清表、绝不碰别人的规则。
-#   * nft      —— 独立 table `inet oneclick`，每条规则带 comment "oneclick-*"
-#   * iptables —— `-m comment --comment "oneclick-*"`，删除前先 -C 确认存在
-#   * firewalld/ufw —— 按端口精确增删；ufw 额外写 comment 便于回收
-# 探测顺序按契约：nft -> firewalld -> ufw -> iptables。
+# 本脚本不修改系统防火墙：不写 iptables/nftables/firewalld/ufw 规则，端口是否
+# 可达由你自己的防火墙策略决定。唯一例外是 hysteria2 的端口跳跃——那由 hysteria
+# 按其 listen 端口段自行安装/清理转发规则（见 src/proto/hysteria2.sh）。
 
 # ===========================================================================
 # 内部工具：公网 IP 校验 / 端口数字校验
@@ -639,691 +635,6 @@ net_port_pick() {
     done
     # 一个都找不到属于极端情况：输出空，由调用方报错
     return 1
-}
-
-# ===========================================================================
-# 防火墙：后端探测
-# ===========================================================================
-
-_net_firewalld_active() {
-    command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1
-}
-
-_net_ufw_active() {
-    command -v ufw >/dev/null 2>&1 || return 1
-    ufw status 2>/dev/null | grep -qw 'active'
-}
-
-# 契约顺序：nft（root + nft 可用）-> firewalld -> ufw(active) -> iptables -> none
-net_fw_backend() {
-    if [[ "${EUID:-$(id -u)}" -eq 0 ]] && command -v nft >/dev/null 2>&1 \
-        && nft list tables >/dev/null 2>&1; then
-        printf 'nft'
-        return 0
-    fi
-    if _net_firewalld_active; then
-        printf 'firewalld'
-        return 0
-    fi
-    if _net_ufw_active; then
-        printf 'ufw'
-        return 0
-    fi
-    if command -v iptables >/dev/null 2>&1 && iptables -S INPUT >/dev/null 2>&1; then
-        printf 'iptables'
-        return 0
-    fi
-    printf 'none'
-}
-
-# ===========================================================================
-# 防火墙：nft 后端（独立 table inet oneclick）
-# ===========================================================================
-
-_net_nft_ready() {
-    command -v nft >/dev/null 2>&1 || return 1
-    if ! nft list table inet oneclick >/dev/null 2>&1; then
-        nft add table inet oneclick 2>/dev/null || return 1
-    fi
-    if ! nft list chain inet oneclick input >/dev/null 2>&1; then
-        nft add chain inet oneclick input '{ type filter hook input priority 0 ; policy accept ; }' 2>/dev/null || return 1
-    fi
-    return 0
-}
-
-# nat prerouting 链：inet 族的 nat 链需要较新内核，老内核（如 RHEL8）会失败，
-# 由调用方回退到 iptables nat，不在这里硬失败。
-_net_nft_prerouting_ready() {
-    _net_nft_ready || return 1
-    if ! nft list chain inet oneclick prerouting >/dev/null 2>&1; then
-        nft add chain inet oneclick prerouting '{ type nat hook prerouting priority -100 ; policy accept ; }' 2>/dev/null || return 1
-    fi
-    return 0
-}
-
-_net_nft_list() {
-    nft -a list chain inet oneclick "$1" 2>/dev/null
-}
-
-# 规则里是否已存在同 proto/port/tag 的规则（避免重复叠加）
-_net_nft_has_rule() {
-    local chain="$1" proto="$2" port="$3" tag="$4"
-    _net_nft_list "$chain" | awk -v proto="$proto" -v port="$port" -v tag="\"$tag\"" '
-        index($0, proto " dport " port " ") && index($0, "comment " tag) { f = 1 }
-        END { exit !f }'
-}
-
-# 把规则文本"proto dport <port>"里命中的 oneclick- 规则 handle 打出来
-_net_nft_handles_for_port() {
-    local chain="$1" proto="$2" port="$3" tag="${4:-}"
-    _net_nft_list "$chain" | awk -v proto="$proto" -v port="$port" -v tag="$tag" '
-        {
-            if ($0 !~ /# handle [0-9]+$/) next
-            if (index($0, "comment \"oneclick-") == 0) next
-            if (index($0, proto " dport " port " ") == 0) next
-            if (tag != "" && index($0, "comment \"" tag "\"") == 0) next
-            print $NF
-        }'
-}
-
-# 按 tag 精确取 handle（端口跳跃用）
-_net_nft_handles_for_tag() {
-    local chain="$1" tag="$2"
-    _net_nft_list "$chain" | awk -v tag="\"$tag\"" '
-        index($0, "comment " tag) && /# handle [0-9]+$/ { print $NF }'
-}
-
-_net_nft_del_handles() {
-    local chain="$1" h
-    shift
-    for h in "$@"; do
-        [[ "$h" =~ ^[0-9]+$ ]] || continue
-        nft delete rule inet oneclick "$chain" handle "$h" 2>/dev/null || true
-    done
-}
-
-# 让 table inet oneclick 在重启后自动恢复：dump 到 /etc/oneclick，再挂一个 oneshot unit。
-# （nft 规则不写盘重启即丢；不能去改系统的 /etc/nftables.conf，避免动别人的规则。）
-_net_nft_persist() {
-    local dump="$OC_ROOT/nft-oneclick.nft" unit="oneclick-firewall" unitfile
-    command -v nft >/dev/null 2>&1 || return 0
-    nft list table inet oneclick >/dev/null 2>&1 || return 0
-    mkdir -p "$OC_ROOT" 2>/dev/null || return 0
-    nft list table inet oneclick > "$dump" 2>/dev/null || return 0
-    chmod 600 "$dump" 2>/dev/null || true
-    [[ -d /run/systemd/system ]] || return 0
-    unitfile="$OC_UNIT_DIR/$unit.service"
-    [[ -f "$unitfile" ]] && return 0
-    cat > "$unitfile" <<EOF
-[Unit]
-Description=OneClick firewall restore (nftables table inet oneclick)
-ConditionPathExists=$dump
-After=network-online.target nftables.service
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStartPre=-$(command -v nft) delete table inet oneclick
-ExecStart=$(command -v nft) -f $dump
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    chmod 644 "$unitfile" 2>/dev/null || true
-    os_service_reload
-    svc_enable "$unit" || oc_warn "oneclick-firewall 自启注册失败（重启后需重新放行端口）"
-    return 0
-}
-
-_net_nft_allow() {
-    local port="$1" proto="$2" tag="$3"
-    _net_nft_ready || return 1
-    _net_nft_has_rule input "$proto" "$port" "$tag" && return 0
-    nft add rule inet oneclick input "$proto" dport "$port" accept comment "\"$tag\"" 2>/dev/null || return 1
-    _net_nft_persist
-    return 0
-}
-
-_net_nft_deny() {
-    local port="$1" proto="$2" tag="${3:-}"
-    nft list chain inet oneclick input >/dev/null 2>&1 || return 0
-    local -a hs=()
-    mapfile -t hs < <(_net_nft_handles_for_port input "$proto" "$port" "$tag")
-    [[ ${#hs[@]} -eq 0 ]] && return 0
-    _net_nft_del_handles input "${hs[@]}"
-    _net_nft_persist
-    return 0
-}
-
-# ===========================================================================
-# 防火墙：iptables / ip6tables 后端（只动带 oneclick- comment 的规则）
-# ===========================================================================
-
-_net_ipt_available() {
-    command -v "$1" >/dev/null 2>&1 || return 1
-    "$1" -S INPUT >/dev/null 2>&1
-}
-
-# 列出 INPUT 里命中 port/proto 且 comment 为 oneclick-* 的 tag
-_net_ipt_tags() {
-    local cmd="$1" port="$2" proto="$3" tag="${4:-}"
-    "$cmd" -S INPUT 2>/dev/null | awk -v proto="$proto" -v port="$port" -v tag="$tag" '
-        {
-            p = ""; d = ""; c = ""
-            for (i = 1; i <= NF; i++) {
-                if ($i == "-p") p = $(i + 1)
-                else if ($i == "--dport") d = $(i + 1)
-                else if ($i == "--comment") { c = $(i + 1); gsub(/"/, "", c) }
-            }
-            if (p != proto || d != port) next
-            if (c !~ /^oneclick-/) next
-            if (tag != "" && c != tag) next
-            print c
-        }'
-}
-
-# iptables 规则不落盘重启即丢：有 netfilter-persistent 就交给它，否则写发行版标准文件
-_net_ipt_save() {
-    command -v iptables-save >/dev/null 2>&1 || return 0
-    if command -v netfilter-persistent >/dev/null 2>&1; then
-        netfilter-persistent save >/dev/null 2>&1 || true
-        return 0
-    fi
-    if [[ -f /etc/sysconfig/iptables ]]; then
-        iptables-save > /etc/sysconfig/iptables 2>/dev/null || true
-        if command -v ip6tables-save >/dev/null 2>&1 && [[ -f /etc/sysconfig/ip6tables ]]; then
-            ip6tables-save > /etc/sysconfig/ip6tables 2>/dev/null || true
-        fi
-        return 0
-    fi
-    # 非 root / 无该目录时直接放弃，避免 shell 重定向报错泄漏
-    if ! mkdir -p /etc/iptables 2>/dev/null || [[ ! -w /etc/iptables ]]; then
-        return 0
-    fi
-    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-    if command -v ip6tables-save >/dev/null 2>&1; then
-        ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
-        chmod 600 /etc/iptables/rules.v6 2>/dev/null || true
-    fi
-    chmod 600 /etc/iptables/rules.v4 2>/dev/null || true
-    return 0
-}
-
-# 把当前带 oneclick- comment 的规则固化成可重复执行的脚本，并挂 oneshot 单元开机重放。
-# 云主机上 iptables 规则重启即丢；这样即使没装 iptables-persistent，重启后端口也不会失联。
-_net_fw_persist() {
-    local tmp unit n
-    tmp="${OC_FW_FILE}.tmp.$$"
-    unit="$OC_UNIT_DIR/${OC_FW_UNIT}.service"
-    command -v iptables-save >/dev/null 2>&1 || return 0
-    mkdir -p "$OC_ROOT" 2>/dev/null || return 0
-    {
-        printf '#!/bin/sh\n'
-        printf '# generated by oneclick: replay oneclick-* firewall rules at boot\n'
-        _net_fw_persist_dump iptables ip6tables
-    } >"$tmp" 2>/dev/null || {
-        rm -f -- "$tmp"
-        return 0
-    }
-    n=$(($(wc -l <"$tmp") - 2))
-    if ((n <= 0)); then
-        rm -f -- "$tmp"
-        systemctl disable --now "$OC_FW_UNIT" >/dev/null 2>&1 || true
-        rm -f -- "$unit"
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        return 0
-    fi
-    chmod 700 "$tmp" 2>/dev/null || true
-    mv -f -- "$tmp" "$OC_FW_FILE" || return 0
-    if [[ ! -f "$unit" ]]; then
-        mkdir -p "$OC_UNIT_DIR" 2>/dev/null || return 0
-        cat >"$unit" <<EOF
-[Unit]
-Description=OneClick firewall restore (oneclick-* rules only)
-ConditionPathExists=$OC_FW_FILE
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/sh $OC_FW_FILE
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        systemctl daemon-reload >/dev/null 2>&1 || true
-    fi
-    systemctl enable "$OC_FW_UNIT" >/dev/null 2>&1 || true
-    return 0
-}
-
-# 只导出 filter/INPUT 与 nat/PREROUTING 里 comment 命中 oneclick- 的规则
-_net_fw_persist_dump() {
-    local t
-    for t in "$@"; do
-        command -v "${t}-save" >/dev/null 2>&1 || continue
-        "${t}-save" 2>/dev/null | awk -v cmd="$t" '
-            /^\*filter$/ { table = "filter"; next }
-            /^\*nat$/    { table = "nat"; next }
-            /^\*/        { table = ""; next }
-            /^COMMIT$/    { table = ""; next }
-            table == "filter" && $1 == "-A" && $2 == "INPUT" {
-                spec = $0
-                sub(/^-A INPUT /, "", spec)
-                if (spec ~ /oneclick-/) {
-                    printf "%s -C INPUT %s >/dev/null 2>&1 || %s -A INPUT %s\n", cmd, spec, cmd, spec
-                }
-                next
-            }
-            table == "nat" && $1 == "-A" && $2 == "PREROUTING" {
-                spec = $0
-                sub(/^-A PREROUTING /, "", spec)
-                if (spec ~ /oneclick-/) {
-                    printf "%s -t nat -C PREROUTING %s >/dev/null 2>&1 || %s -t nat -A PREROUTING %s\n", cmd, spec, cmd, spec
-                }
-                next
-            }
-        '
-    done
-}
-
-_net_ipt_allow() {
-    local port="$1" proto="$2" tag="$3" t changed=0 ok=0
-    for t in iptables ip6tables; do
-        _net_ipt_available "$t" || continue
-        # 已存在就跳过，重复安装不叠加规则
-        if "$t" -C INPUT -p "$proto" --dport "$port" -m comment --comment "$tag" -j ACCEPT 2>/dev/null; then
-            ok=1
-        elif "$t" -I INPUT 1 -p "$proto" --dport "$port" -m comment --comment "$tag" -j ACCEPT 2>/dev/null; then
-            ok=1
-            changed=1
-        fi
-    done
-    if ((changed)); then
-        _net_ipt_save
-    fi
-    ((ok)) || return 1
-    return 0
-}
-
-_net_ipt_deny() {
-    local port="$1" proto="$2" tag="${3:-}" t c changed=0
-    for t in iptables ip6tables; do
-        _net_ipt_available "$t" || continue
-        while IFS= read -r c; do
-            [[ -n "$c" ]] || continue
-            # 删除前先 -C 确认，只删自己 comment 的规则
-            "$t" -C INPUT -p "$proto" --dport "$port" -m comment --comment "$c" -j ACCEPT 2>/dev/null || continue
-            if "$t" -D INPUT -p "$proto" --dport "$port" -m comment --comment "$c" -j ACCEPT 2>/dev/null; then
-                changed=1
-            fi
-        done < <(_net_ipt_tags "$t" "$port" "$proto" "$tag")
-    done
-    if ((changed)); then
-        _net_ipt_save
-    fi
-    return 0
-}
-
-# ===========================================================================
-# 防火墙：firewalld / ufw 后端
-# ===========================================================================
-
-_net_firewalld_allow() {
-    local port="$1" proto="$2"
-    _net_firewalld_active || return 1
-    firewall-cmd --permanent --add-port="$port/$proto" >/dev/null 2>&1 || return 1
-    if ! firewall-cmd --add-port="$port/$proto" >/dev/null 2>&1; then
-        # 运行时区可能已存在/失效，reload 让 permanent 生效
-        firewall-cmd --reload >/dev/null 2>&1 || true
-    fi
-    # 复核：permanent 写了不等于运行区放行
-    if ! firewall-cmd --query-port="$port/$proto" >/dev/null 2>&1; then
-        firewall-cmd --reload >/dev/null 2>&1 || true
-    fi
-    firewall-cmd --query-port="$port/$proto" >/dev/null 2>&1
-}
-
-_net_firewalld_deny() {
-    local port="$1" proto="$2"
-    _net_firewalld_active || return 0
-    firewall-cmd --query-port="$port/$proto" >/dev/null 2>&1 \
-        && firewall-cmd --remove-port="$port/$proto" >/dev/null 2>&1
-    firewall-cmd --permanent --query-port="$port/$proto" >/dev/null 2>&1 \
-        && firewall-cmd --permanent --remove-port="$port/$proto" >/dev/null 2>&1
-    return 0
-}
-
-_net_ufw_allow() {
-    local port="$1" proto="$2" tag="$3"
-    command -v ufw >/dev/null 2>&1 || return 1
-    if ufw allow "$port/$proto" comment "$tag" >/dev/null 2>&1; then
-        return 0
-    fi
-    # 老版本 ufw 不认 comment：退化成纯端口规则（后续 deny 会按端口兜底）
-    ufw allow "$port/$proto" >/dev/null 2>&1
-}
-
-_net_ufw_deny() {
-    local port="$1" proto="$2" tag="${3:-}" line c
-    command -v ufw >/dev/null 2>&1 || return 0
-    while IFS= read -r line; do
-        [[ -n "$line" ]] || continue
-        c="$(printf '%s' "$line" | sed -n "s/.*comment '\([^']*\)'.*/\1/p")"
-        if [[ -z "$c" ]]; then
-            c="$(printf '%s' "$line" | sed -n "s/.*'\(oneclick-[^']*\)'.*/\1/p")"
-        fi
-        if [[ -z "$c" ]]; then
-            c="$(printf '%s' "$line" | tr ' ' '\n' | grep -m1 '^oneclick-')"
-        fi
-        [[ -n "$c" ]] || continue
-        [[ "$c" == oneclick-* ]] || continue
-        if [[ -n "$tag" && "$c" != "$tag" ]]; then
-            continue
-        fi
-        ufw --force delete allow "$port/$proto" comment "$c" >/dev/null 2>&1 \
-            || oc_warn "未能删除 ufw 规则：${port}/${proto}（comment ${c}）"
-    done < <(ufw show added 2>/dev/null | grep -F "allow $port/$proto")
-    return 0
-}
-
-# ===========================================================================
-# 防火墙：对外 API
-# ===========================================================================
-
-# net_fw_allow <port> <tcp|udp> [comment]
-net_fw_allow() {
-    local port proto tag backend rc=0
-    port="$(_net_port_num "${1:-}")" || { oc_err "net_fw_allow: 端口非法：${1:-<空>}"; return 1; }
-    proto="${2:-tcp}"
-    tag="${3:-}"
-    case "$proto" in
-        tcp|udp) ;;
-        *) oc_err "net_fw_allow: 协议应为 tcp|udp：$proto"; return 1 ;;
-    esac
-    if [[ -z "$tag" ]]; then
-        # 默认 oneclick-<调用者>，只保留安全字符（iptables comment 上限 256）
-        tag="oneclick-${FUNCNAME[1]:-user}"
-        tag="${tag//[^A-Za-z0-9_.-]/-}"
-        tag="${tag:0:64}"
-    fi
-    backend="$(net_fw_backend)"
-    case "$backend" in
-        iptables)
-            _net_ipt_allow "$port" "$proto" "$tag" || rc=1
-            ;;
-        firewalld)
-            _net_firewalld_allow "$port" "$proto" || rc=1
-            ;;
-        ufw)
-            _net_ufw_allow "$port" "$proto" "$tag" || rc=1
-            ;;
-        nft)
-            _net_nft_allow "$port" "$proto" "$tag" || rc=1
-            # 独立的 inet oneclick 表不能覆盖 firewalld/ufw 自己的 DROP 链，
-            # 所以活跃的管理器必须同步放行，否则装了也连不上。
-            if _net_firewalld_active; then
-                _net_firewalld_allow "$port" "$proto" || rc=1
-            fi
-            if _net_ufw_active; then
-                _net_ufw_allow "$port" "$proto" "$tag" || rc=1
-            fi
-            ;;
-        *)
-            oc_warn "未检测到可用防火墙，跳过放行 ${port}/${proto}；请在云安全组放行"
-            return 0
-            ;;
-    esac
-    if ((rc == 0)); then
-        oc_ok "已放行 ${port}/${proto}（${backend}）"
-    else
-        oc_err "放行 ${port}/${proto} 失败（${backend}）"
-    fi
-    _net_fw_persist
-    return "$rc"
-}
-
-# net_fw_deny <port> <tcp|udp> [comment]：撤销放行，只删 oneclick-* 规则
-net_fw_deny() {
-    local port proto tag any=0 rc=0
-    port="$(_net_port_num "${1:-}")" || { oc_err "net_fw_deny: 端口非法：${1:-<空>}"; return 1; }
-    proto="${2:-tcp}"
-    tag="${3:-}"
-    case "$proto" in
-        tcp|udp) ;;
-        *) oc_err "net_fw_deny: 协议应为 tcp|udp：$proto"; return 1 ;;
-    esac
-    # 后端可能在安装后被换掉（比如后来装了 nftables），所以所有存在的后端都尝试一遍；
-    # 每个删除路径都只匹配 oneclick- comment 或精确端口，不会误删别人的规则。
-    if command -v nft >/dev/null 2>&1 && nft list table inet oneclick >/dev/null 2>&1; then
-        _net_nft_deny "$port" "$proto" "$tag" || rc=1
-        any=1
-    fi
-    if _net_firewalld_active; then
-        _net_firewalld_deny "$port" "$proto" || rc=1
-        any=1
-    fi
-    if command -v ufw >/dev/null 2>&1; then
-        _net_ufw_deny "$port" "$proto" "$tag" || rc=1
-        any=1
-    fi
-    if command -v iptables >/dev/null 2>&1; then
-        _net_ipt_deny "$port" "$proto" "$tag" || rc=1
-        any=1
-    fi
-    if ((any == 0)); then
-        oc_warn "未检测到防火墙，无需撤销 ${port}/${proto}"
-        return 0
-    fi
-    if ((rc == 0)); then
-        oc_ok "已撤销 ${port}/${proto} 的放行规则"
-    fi
-    _net_fw_persist
-    return "$rc"
-}
-
-# net_fw_status：打印后端 + 各管理器里属于 oneclick 的规则数量
-net_fw_status() {
-    local backend n
-    backend="$(net_fw_backend)"
-    oc_kv "防火墙后端" "$backend"
-    if command -v nft >/dev/null 2>&1 && nft list table inet oneclick >/dev/null 2>&1; then
-        n="$(nft -a list table inet oneclick 2>/dev/null | grep -c 'comment "oneclick-' || true)"
-        oc_kv "nft(inet oneclick) 规则" "${n:-0}"
-    fi
-    if _net_ipt_available iptables; then
-        n="$(iptables -S INPUT 2>/dev/null | grep -cE 'comment "?oneclick-' || true)"
-        oc_kv "iptables(oneclick-) 规则" "${n:-0}"
-    fi
-    if _net_firewalld_active; then
-        oc_kv "firewalld 放行端口" "$(firewall-cmd --list-ports 2>/dev/null || true)"
-    fi
-    if command -v ufw >/dev/null 2>&1 && _net_ufw_active; then
-        n="$(ufw show added 2>/dev/null | grep -cE "comment 'oneclick-" || true)"
-        oc_kv "ufw(oneclick-) 规则" "${n:-0}"
-    fi
-    return 0
-}
-
-# ===========================================================================
-# UDP 端口跳跃：PREROUTING DNAT 到本机目标端口，comment oneclick-hop-<key>
-# ===========================================================================
-
-_net_hop_key() {
-    local k="$1"
-    [[ "$k" =~ ^[A-Za-z0-9_-]{1,32}$ ]] || return 1
-    printf '%s' "$k"
-}
-
-_net_hop_ipt_rules() {
-    local cmd="$1" tag="$2"
-    "$cmd" -t nat -S PREROUTING 2>/dev/null | awk -v tag="$tag" '
-        {
-            c = ""; p = ""; d = ""; to = ""
-            for (i = 1; i <= NF; i++) {
-                if ($i == "-p") p = $(i + 1)
-                else if ($i == "--dport") d = $(i + 1)
-                else if ($i == "--to-destination") to = $(i + 1)
-                else if ($i == "--comment") { c = $(i + 1); gsub(/"/, "", c) }
-            }
-            if (c == tag && p == "udp" && d != "" && to != "") print d, to
-        }'
-}
-
-_net_hop_ipt_add() {
-    local start="$1" end="$2" target="$3" tag="$4" t added=0 verified=0
-    for t in iptables ip6tables; do
-        command -v "$t" >/dev/null 2>&1 || continue
-        "$t" -t nat -S PREROUTING >/dev/null 2>&1 || continue
-        # 已存在就不再加，避免重复叠加
-        if ! "$t" -t nat -C PREROUTING -p udp --dport "$start:$end" -m comment --comment "$tag" \
-                -j DNAT --to-destination ":$target" 2>/dev/null; then
-            if "$t" -t nat -A PREROUTING -p udp --dport "$start:$end" -m comment --comment "$tag" \
-                    -j DNAT --to-destination ":$target" 2>/dev/null; then
-                added=1
-            fi
-        fi
-        if "$t" -t nat -C PREROUTING -p udp --dport "$start:$end" -m comment --comment "$tag" \
-                -j DNAT --to-destination ":$target" 2>/dev/null; then
-            verified=1
-        fi
-    done
-    if ((added)); then
-        _net_ipt_save
-    fi
-    ((verified))
-}
-
-_net_hop_ipt_del() {
-    local tag="$1" t d to changed=0
-    for t in iptables ip6tables; do
-        command -v "$t" >/dev/null 2>&1 || continue
-        while read -r d to; do
-            [[ -n "$d" && -n "$to" ]] || continue
-            if "$t" -t nat -D PREROUTING -p udp --dport "$d" -m comment --comment "$tag" \
-                    -j DNAT --to-destination "$to" 2>/dev/null; then
-                changed=1
-            fi
-        done < <(_net_hop_ipt_rules "$t" "$tag")
-    done
-    if ((changed)); then
-        _net_ipt_save
-    fi
-    return 0
-}
-
-_net_hop_ipt_show() {
-    local tag="$1" t d to
-    for t in iptables ip6tables; do
-        command -v "$t" >/dev/null 2>&1 || continue
-        while read -r d to; do
-            [[ -n "$d" && -n "$to" ]] || continue
-            printf '  %s: UDP %s → 本机%s\n' "$t" "$d" "$to"
-        done < <(_net_hop_ipt_rules "$t" "$tag")
-    done
-}
-
-_net_hop_nft_add() {
-    local start="$1" end="$2" target="$3" tag="$4"
-    _net_nft_prerouting_ready || return 1
-    _net_nft_has_rule prerouting udp "$start-$end" "$tag" && return 0
-    # redirect to :port 等价于"改端口 + 落到本机"，正是本地端口跳跃需要的
-    nft add rule inet oneclick prerouting udp dport "$start-$end" redirect to ":$target" comment "\"$tag\"" 2>/dev/null || return 1
-    _net_nft_persist
-    return 0
-}
-
-_net_hop_nft_del() {
-    local tag="$1"
-    local -a hs=()
-    nft list chain inet oneclick prerouting >/dev/null 2>&1 || return 0
-    mapfile -t hs < <(_net_nft_handles_for_tag prerouting "$tag")
-    [[ ${#hs[@]} -eq 0 ]] && return 0
-    _net_nft_del_handles prerouting "${hs[@]}"
-    _net_nft_persist
-    return 0
-}
-
-_net_hop_nft_show() {
-    local tag="$1"
-    nft -a list chain inet oneclick prerouting 2>/dev/null | awk -v tag="\"$tag\"" '
-        index($0, "comment " tag) { gsub(/^[ \t]+/, ""); print "  nft: " $0 }'
-}
-
-# 汇总两种后端里该 tag 的规则（判残留 / 展示用）
-_net_hop_all() {
-    local tag="$1"
-    _net_hop_ipt_show "$tag"
-    _net_hop_nft_show "$tag"
-}
-
-# net_nat_hop_add <key> <port_start> <port_end> <target_port>
-net_nat_hop_add() {
-    local key start end target tag
-    key="$(_net_hop_key "${1:-}")" || { oc_err "net_nat_hop_add: key 非法（仅限字母数字_-）"; return 1; }
-    start="$(_net_port_num "${2:-}")" || { oc_err "net_nat_hop_add: 起始端口非法"; return 1; }
-    end="$(_net_port_num "${3:-}")" || { oc_err "net_nat_hop_add: 结束端口非法"; return 1; }
-    target="$(_net_port_num "${4:-}")" || { oc_err "net_nat_hop_add: 目标端口非法"; return 1; }
-    if ((start > end)); then
-        oc_err "net_nat_hop_add: 端口范围非法（$start > $end）"
-        return 1
-    fi
-    tag="oneclick-hop-$key"
-    # nat 表与 input 防火墙后端无关：优先 iptables（兼容性最好），失败再试 nft。
-    # 老内核没有 inet 族 nat 链，所以不能只依赖 nft。
-    local ok=0
-    if command -v iptables >/dev/null 2>&1 && iptables -t nat -S PREROUTING >/dev/null 2>&1; then
-        if _net_hop_ipt_add "$start" "$end" "$target" "$tag"; then
-            ok=1
-        fi
-    fi
-    if ((ok == 0)); then
-        if _net_hop_nft_add "$start" "$end" "$target" "$tag"; then
-            ok=1
-        fi
-    fi
-    if ((ok == 0)); then
-        oc_err "net_nat_hop_add: iptables 与 nftables 均不可用，无法配置端口跳跃"
-        return 1
-    fi
-    oc_ok "端口跳跃：UDP ${start}-${end} → ${target}（${tag}）"
-    _net_fw_persist
-    return 0
-}
-
-# net_nat_hop_del <key>：按 comment 精确删除，绝不碰别人的规则
-net_nat_hop_del() {
-    local key tag left
-    key="$(_net_hop_key "${1:-}")" || { oc_err "net_nat_hop_del: key 非法（仅限字母数字_-）"; return 1; }
-    tag="oneclick-hop-$key"
-    _net_hop_ipt_del "$tag"
-    _net_hop_nft_del "$tag"
-    left="$(_net_hop_all "$tag")"
-    if [[ -n "$left" ]]; then
-        oc_warn "仍有端口跳跃规则残留（${tag}），请手动检查："
-        printf '%s\n' "$left"
-        return 1
-    fi
-    oc_ok "端口跳跃规则已清理（${tag}）"
-    _net_fw_persist
-    return 0
-}
-
-# net_nat_hop_show <key>
-net_nat_hop_show() {
-    local key tag out
-    key="$(_net_hop_key "${1:-}")" || { oc_err "net_nat_hop_show: key 非法（仅限字母数字_-）"; return 1; }
-    tag="oneclick-hop-$key"
-    out="$(_net_hop_all "$tag")"
-    if [[ -z "$out" ]]; then
-        oc_info "无端口跳跃规则（${tag}）"
-        return 0
-    fi
-    oc_title "端口跳跃 ${tag}"
-    printf '%s\n' "$out"
-    return 0
 }
 
 # ===== src/lib/cert.sh =====
@@ -2460,8 +1771,6 @@ ocp_vless_reality_ip() {
     printf '%s' "$ip"
 }
 
-ocp_vless_reality_fw_comment() { printf 'oneclick-vless-reality'; }
-
 proto_vless_reality_meta() {
     local port
     port="$(db_get vless_reality port "")"
@@ -2581,8 +1890,6 @@ proto_vless_reality_install() {
     oc_ok "服务已启动：$unit"
 
     # 先按 comment 删旧规则再放行，重装/重跑不会叠加
-    net_fw_deny "$port" tcp "$(ocp_vless_reality_fw_comment)" >/dev/null 2>&1 || true
-    net_fw_allow "$port" tcp "$(ocp_vless_reality_fw_comment)" || oc_warn "防火墙放行失败，请手动放行 $port/tcp"
 
     db_set "$key" port "$port"
     db_set "$key" server_name "$sni"
@@ -2643,7 +1950,6 @@ proto_vless_reality_uninstall() {
         oc_ok "已删除配置目录：$dir"
     fi
 
-    net_fw_deny "$port" tcp "$(ocp_vless_reality_fw_comment)" || oc_warn "撤销防火墙规则失败，请手动检查 $port/tcp"
     db_del "$key"
     db_unmark_installed "$key"
     oc_ok "VLESS-Reality 已卸载"
@@ -2746,8 +2052,6 @@ proto_vless_reality_regen() {
         svc_logs "$unit" 30 >&2
         oc_die "配置已重写但服务未起来，请检查日志"
     fi
-    net_fw_deny "$port" tcp "$(ocp_vless_reality_fw_comment)" >/dev/null 2>&1 || true
-    net_fw_allow "$port" tcp "$(ocp_vless_reality_fw_comment)" >/dev/null 2>&1 || true
     oc_ok "配置已重写并重启：$cfg"
     proto_vless_reality_status
 }
@@ -2942,17 +2246,19 @@ ocp_hy2_fetch_bin() {
 
 # 写服务端 YAML（/etc/oneclick/hysteria2/config.yaml，600）；内容无变化时不重写
 ocp_hy2_write_config() {
-    local port="$1" pw="$2" cert="$3" key="$4" obfs="$5" obfs_pw="$6"
-    local dir cfg tmp epw eopw
+    local port="$1" pw="$2" cert="$3" key="$4" obfs="$5" obfs_pw="$6" hop="${7:-}"
+    local dir cfg tmp epw eopw listen
     dir="$(ocp_hy2_dir)"
     cfg="$(ocp_hy2_cfg)"
     epw="$(ocp_hy2_yaml_escape "$pw")"
     mkdir -p "$dir" || return 1
     chmod 700 "$dir" 2>/dev/null || true
     tmp="${cfg}.tmp.$$"
+    listen="$port"
+    [[ -n "$hop" ]] && listen="${port},${hop}"
     {
         cat <<EOF
-listen: :${port}
+listen: :${listen}
 
 auth:
   type: password
@@ -3032,7 +2338,7 @@ proto_hysteria2_meta() {
 
 proto_hysteria2_install() {
     local unit port defport mode sni_hint crt_file key_file sni pw obfs obfs_pw
-    local hop hop_start hop_end pubip tmpbin arch
+    local hop pubip tmpbin arch
 
     oc_require_root
     [[ -n "${OC_ARCH:-}" ]] || os_detect
@@ -3121,7 +2427,7 @@ proto_hysteria2_install() {
     fi
 
     hop=""
-    if oc_confirm "是否启用端口跳跃（UDP 端口段 DNAT 到主端口，可缓解 QoS 封锁）？" n; then
+    if oc_confirm "是否启用端口跳跃（UDP 端口段，由 hysteria 自身安排转发，停止时自动清理）？" n; then
         local hs he
         hs="$(oc_ask "端口段起始" 20000)"
         he="$(oc_ask "端口段结束" 30000)"
@@ -3132,7 +2438,7 @@ proto_hysteria2_install() {
     fi
 
     # 6. 写配置
-    ocp_hy2_write_config "$port" "$pw" "$crt_file" "$key_file" "$obfs" "$obfs_pw" ||
+    ocp_hy2_write_config "$port" "$pw" "$crt_file" "$key_file" "$obfs" "$obfs_pw" "$hop" ||
         oc_die "写入配置失败：$(ocp_hy2_cfg)"
     oc_ok "配置已写入：$(ocp_hy2_cfg)"
 
@@ -3149,20 +2455,7 @@ proto_hysteria2_install() {
     fi
     oc_ok "服务已启动：${unit}"
 
-    # 8. 防火墙与端口跳跃（先撤后加，保证重复执行不叠加规则）
-    net_fw_deny "$port" udp "oneclick-hysteria2" >/dev/null 2>&1 || true
-    net_fw_allow "$port" udp "oneclick-hysteria2" >/dev/null 2>&1 || oc_warn "防火墙放行 UDP ${port} 失败，请手动检查"
-    net_nat_hop_del hy2 >/dev/null 2>&1 || true
-    if [[ -n "$hop" ]]; then
-        hop_start="${hop%%-*}"
-        hop_end="${hop##*-}"
-        if net_nat_hop_add hy2 "$hop_start" "$hop_end" "$port" >/dev/null 2>&1; then
-            oc_ok "端口跳跃已启用：UDP ${hop} → ${port}"
-        else
-            oc_warn "端口跳跃规则添加失败，已回退为单端口模式"
-            hop=""
-        fi
-    fi
+    [[ -n "$hop" ]] && oc_ok "端口跳跃已启用：UDP ${hop}（转发规则由 hysteria 管理）"
 
     # 9. 落库
     db_set hysteria2 port "$port"
@@ -3216,16 +2509,12 @@ proto_hysteria2_uninstall() {
         oc_warn "Hysteria2 未安装"
         return 0
     fi
-    oc_confirm "确认卸载 Hysteria2（停止服务、删除配置与防火墙规则）？" y || {
+    oc_confirm "确认卸载 Hysteria2（停止服务并删除配置）？" y || {
         oc_info "已取消"
         return 0
     }
     port="$(db_get hysteria2 port "")"
     svc_remove "$unit"
-    if [[ -n "$port" ]]; then
-        net_fw_deny "$port" udp "oneclick-hysteria2" >/dev/null 2>&1 || oc_warn "撤销防火墙规则失败，请手动检查"
-    fi
-    net_nat_hop_del hy2 >/dev/null 2>&1 || true
     dir="$(ocp_hy2_dir)"
     if [[ -n "$dir" && "$dir" == "${OC_ROOT}/"* && -d "$dir" ]]; then
         rm -rf -- "$dir"
@@ -3287,7 +2576,7 @@ proto_hysteria2_link() {
 }
 
 proto_hysteria2_regen() {
-    local unit port pw sni crt_file key_file obfs obfs_pw hop hop_start hop_end
+    local unit port pw sni crt_file key_file obfs obfs_pw hop
     oc_require_root
     if ! db_is_installed hysteria2; then
         oc_die "Hysteria2 未安装，无法重生成配置"
@@ -3308,7 +2597,7 @@ proto_hysteria2_regen() {
     fi
     [[ "$obfs" == "salamander" ]] || obfs="off"
 
-    ocp_hy2_write_config "$port" "$pw" "$crt_file" "$key_file" "$obfs" "$obfs_pw" ||
+    ocp_hy2_write_config "$port" "$pw" "$crt_file" "$key_file" "$obfs" "$obfs_pw" "$hop" ||
         oc_die "写入配置失败：$(ocp_hy2_cfg)"
     ocp_hy2_write_unit
     unit="$(oc_unit_name hysteria2)"
@@ -3321,14 +2610,6 @@ proto_hysteria2_regen() {
         oc_die "配置重生成后启动失败"
     fi
 
-    # 端口可能变了：端口跳跃的 DNAT 目标要跟着更新
-    net_nat_hop_del hy2 >/dev/null 2>&1 || true
-    if [[ -n "$hop" ]]; then
-        hop_start="${hop%%-*}"
-        hop_end="${hop##*-}"
-        net_nat_hop_add hy2 "$hop_start" "$hop_end" "$port" >/dev/null 2>&1 ||
-            oc_warn "端口跳跃规则刷新失败，请重新执行安装以修复"
-    fi
     oc_ok "配置已重生成并重启：$(ocp_hy2_cfg)"
 }
 
@@ -3493,12 +2774,6 @@ ocp_snell_bin() {
 
 ocp_snell_unit() {
     oc_unit_name snell
-}
-
-# 防火墙规则 tag：与 99-menu.sh 的 "oneclick-$key" 完全一致，
-# 这样菜单改端口时放的规则和本文件撤销的规则能对上，不会各留一份。
-ocp_snell_tag() {
-    printf 'oneclick-snell'
 }
 
 # 默认端口：状态库已有值就沿用（重装/改端口后再装都保持同一个入口）
@@ -3725,14 +3000,6 @@ proto_snell_install() {
     fi
     oc_ok "服务已启动：$unit"
 
-    # 7. 防火墙：Snell 只有 TCP。先按 tag 撤旧规则再放行，重跑不叠加
-    net_fw_deny "$port" tcp "$(ocp_snell_tag)" >/dev/null 2>&1 || true
-    net_fw_allow "$port" tcp "$(ocp_snell_tag)" >/dev/null 2>&1 ||
-        oc_warn "防火墙放行 TCP/${port} 失败，请手动检查"
-    if [[ -n "$old_port" && "$old_port" != "$port" ]]; then
-        net_fw_deny "$old_port" tcp "$(ocp_snell_tag)" >/dev/null 2>&1 || true
-    fi
-
     # 8. 状态库：所有字段一次写全，最后才 mark_installed（失败时不会留下"已安装"假象）
     db_set snell port "$port"
     db_set snell psk "$psk"
@@ -3782,10 +3049,6 @@ proto_snell_uninstall() {
 
     svc_remove "$unit"
     oc_ok "已停止并移除服务：$unit"
-    if [[ -n "$port" ]]; then
-        net_fw_deny "$port" tcp "$(ocp_snell_tag)" >/dev/null 2>&1 ||
-            oc_warn "撤销 TCP/${port} 放行失败，请手动检查"
-    fi
     # 默认一并删除；但若用户原有的 snell-server.service（或其他面板）还引用同一路径，
     # 删掉会让别人的服务重启后起不来，此时保留并说明。
     if svc_bin_referenced "$bin"; then
@@ -3885,13 +3148,6 @@ proto_snell_regen() {
         oc_err "重启后服务未运行，最近日志："
         svc_logs "$unit" 30 >&2
         return 1
-    fi
-
-    # 防火墙补齐（菜单改端口只按 meta 放行了一个协议，这里统一对齐）
-    net_fw_deny "$port" tcp "$(ocp_snell_tag)" >/dev/null 2>&1 || true
-    net_fw_allow "$port" tcp "$(ocp_snell_tag)" >/dev/null 2>&1 || true
-    if [[ -n "$old_port" && "$old_port" != "$port" ]]; then
-        net_fw_deny "$old_port" tcp "$(ocp_snell_tag)" >/dev/null 2>&1 || true
     fi
 
     oc_ok "配置已重生成并重启：$cfg"
@@ -4048,16 +3304,6 @@ ocp_ssrust_unit() {
 
 ocp_ssrust_stls_unit() {
     printf '%s' "$(oc_unit_name ss_rust)-shadowtls"
-}
-
-# 防火墙 tag 与 99-menu.sh 的 "oneclick-$key" 对齐；ShadowTLS 入口另用一个 tag，
-# 这样卸载/改端口时能分别精确撤销，不会误删直连端口的规则。
-ocp_ssrust_tag() {
-    printf 'oneclick-ss_rust'
-}
-
-ocp_ssrust_stls_tag() {
-    printf 'oneclick-ss_rust-shadowtls'
 }
 
 ocp_ssrust_default_port() {
@@ -4606,28 +3852,7 @@ proto_ss_rust_install() {
         oc_ok "已移除旧的 ShadowTLS 服务：$stl_unit"
     fi
 
-    # 9. 防火墙：SS 的 TCP 与 UDP 都要（UDP 中继），ShadowTLS 入口只 TCP。
-    #    先按 tag 撤旧规则再放行，重跑不叠加。
-    net_fw_deny "$port" tcp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-    net_fw_allow "$port" tcp "$(ocp_ssrust_tag)" >/dev/null 2>&1 ||
-        oc_warn "防火墙放行 TCP/${port} 失败，请手动检查"
-    net_fw_deny "$port" udp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-    net_fw_allow "$port" udp "$(ocp_ssrust_tag)" >/dev/null 2>&1 ||
-        oc_warn "防火墙放行 UDP/${port} 失败，请手动检查（UDP 中继不可用）"
-    if [[ -n "$old_port" && "$old_port" != "$port" ]]; then
-        net_fw_deny "$old_port" tcp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-        net_fw_deny "$old_port" udp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-    fi
-    if [[ "$stls" == "yes" ]]; then
-        net_fw_deny "$stls_port" tcp "$(ocp_ssrust_stls_tag)" >/dev/null 2>&1 || true
-        net_fw_allow "$stls_port" tcp "$(ocp_ssrust_stls_tag)" >/dev/null 2>&1 ||
-            oc_warn "防火墙放行 TCP/${stls_port} 失败，请手动检查"
-    fi
-    if [[ -n "$old_stls_port" && "$old_stls_port" != "$stls_port" ]]; then
-        net_fw_deny "$old_stls_port" tcp "$(ocp_ssrust_stls_tag)" >/dev/null 2>&1 || true
-    fi
-
-    # 10. 状态库：字段一次写全，最后才 mark_installed
+    # 9. 状态库：字段一次写全，最后才 mark_installed
     db_set ss_rust port "$port"
     db_set ss_rust method "$method"
     db_set ss_rust password "$password"
@@ -4684,7 +3909,7 @@ proto_ss_rust_uninstall() {
         return 0
     fi
     if [[ "${OC_YES:-0}" != "1" ]]; then
-        oc_confirm "确认卸载 SS-Rust（停止服务、删除配置与防火墙规则）？" n || {
+        oc_confirm "确认卸载 SS-Rust（停止服务并删除配置）？" n || {
             oc_info "已取消"
             return 0
         }
@@ -4700,14 +3925,6 @@ proto_ss_rust_uninstall() {
     svc_remove "$stl_unit"
     svc_remove "$unit"
     oc_ok "已停止并移除服务：${unit} ${stl_unit}"
-    if [[ -n "$port" ]]; then
-        net_fw_deny "$port" tcp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-        net_fw_deny "$port" udp "$(ocp_ssrust_tag)" >/dev/null 2>&1 ||
-            oc_warn "撤销 UDP/${port} 放行失败，请手动检查"
-    fi
-    if [[ -n "$stls_port" ]]; then
-        net_fw_deny "$stls_port" tcp "$(ocp_ssrust_stls_tag)" >/dev/null 2>&1 || true
-    fi
     # 两个二进制都只服务本协议，默认删除（OC_YES=1 按默认 yes 删，避免留孤儿）
     if svc_bin_referenced "$(ocp_ssrust_bin)" || svc_bin_referenced "$(ocp_ssrust_stls_bin)"; then
         oc_warn "检测到其他 systemd 服务仍在引用 ssserver/shadow-tls，保留不删"
@@ -4893,23 +4110,6 @@ proto_ss_rust_regen() {
         # 状态库里已关掉 ShadowTLS，但旧单元还在：清掉，别让它继续占端口
         svc_remove "$stl_unit"
         oc_ok "已移除旧的 ShadowTLS 服务：$stl_unit"
-    fi
-
-    # 防火墙补齐：菜单改端口时只放行了一个协议，这里把 tcp/udp/入口都对一遍
-    net_fw_deny "$port" tcp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-    net_fw_allow "$port" tcp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-    net_fw_deny "$port" udp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-    net_fw_allow "$port" udp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-    if [[ -n "$old_port" && "$old_port" != "$port" ]]; then
-        net_fw_deny "$old_port" tcp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-        net_fw_deny "$old_port" udp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-    fi
-    if [[ "$shadowtls" == "yes" ]]; then
-        net_fw_deny "$stls_port" tcp "$(ocp_ssrust_stls_tag)" >/dev/null 2>&1 || true
-        net_fw_allow "$stls_port" tcp "$(ocp_ssrust_stls_tag)" >/dev/null 2>&1 || true
-    fi
-    if [[ -n "$old_stls_port" && "$old_stls_port" != "$stls_port" ]]; then
-        net_fw_deny "$old_stls_port" tcp "$(ocp_ssrust_stls_tag)" >/dev/null 2>&1 || true
     fi
 
     oc_ok "配置已重生成并重启：$cfg"
@@ -5346,10 +4546,6 @@ proto_anytls_install() {
     fi
     oc_ok "服务已启动：${unit}"
 
-    # 8. 防火墙
-    net_fw_deny "$port" tcp "oneclick-anytls" >/dev/null 2>&1 || true
-    net_fw_allow "$port" tcp "oneclick-anytls" >/dev/null 2>&1 || oc_warn "防火墙放行 TCP ${port} 失败，请手动检查"
-
     # 9. 落库（sing-box 二进制共享，卸载时保留）
     db_set anytls port "$port"
     db_set anytls password "$pw"
@@ -5397,9 +4593,6 @@ proto_anytls_uninstall() {
     }
     port="$(db_get anytls port "")"
     svc_remove "$unit"
-    if [[ -n "$port" ]]; then
-        net_fw_deny "$port" tcp "oneclick-anytls" >/dev/null 2>&1 || oc_warn "撤销防火墙规则失败，请手动检查"
-    fi
     dir="$(ocp_anytls_dir)"
     if [[ -n "$dir" && "$dir" == "${OC_ROOT}/"* && -d "$dir" ]]; then
         rm -rf -- "$dir"
@@ -5696,10 +4889,7 @@ _menu_change_port() {
     [[ "$(oc_meta_field "$k" udp)" == "yes" ]] && proto="udp"
     net_port_in_use "$new" "$proto" && { oc_err "端口 $new 已被占用"; return 1; }
     db_set "$k" port "$new"
-    # 防火墙：先放行新端口，重生成成功后再撤旧端口
-    net_fw_allow "$new" "$proto" "oneclick-$k" >/dev/null 2>&1
     if oc_call "$k" regen; then
-        net_fw_deny "$old" "$proto" "oneclick-$k" >/dev/null 2>&1
         oc_ok "端口已改为 $new"
     else
         db_set "$k" port "$old"
@@ -5727,7 +4917,7 @@ _menu_change_pw() {
 
 _menu_delete() {
     local k="$1"
-    oc_confirm "确认删除 $(oc_title_of "$k")（配置与防火墙规则一并清理）？" n || return 1
+    oc_confirm "确认删除 $(oc_title_of "$k")（配置一并清理）？" n || return 1
     oc_call "$k" uninstall
     return 0
 }
@@ -5805,7 +4995,6 @@ menu_system() {
         local c
         c="$(oc_menu "系统工具" \
             "补装缺失的基础依赖" \
-            "防火墙：放行已装协议端口" \
             "查询端口占用" \
             "设置 GitHub 镜像前缀" \
             "重新检测公网 IP" \
@@ -5813,16 +5002,15 @@ menu_system() {
         case "$c" in
             0) return 0 ;;
             1) os_dep_install base && oc_ok "依赖就绪（只装缺失项）"; oc_pause ;;
-            2) _sys_open_ports; oc_pause ;;
-            3) local p
+            2) local p
                p="$(oc_ask "端口号" "")"
                [[ -n "$p" ]] && { net_port_in_use "$p" tcp && oc_warn "TCP $p 已占用" || oc_ok "TCP $p 空闲"
                                    net_port_in_use "$p" udp && oc_warn "UDP $p 已占用" || oc_ok "UDP $p 空闲"; }
                oc_pause ;;
-            4) local m
+            3) local m
                m="$(oc_ask "镜像前缀（如 https://gh-proxy.net，留空则直连）" "$(db_setting gh_proxy)")"
                db_setting gh_proxy "$m" && oc_ok "已保存：${m:-直连}"; oc_pause ;;
-            5) local ip
+            4) local ip
                ip="$(net_primary_ip)"
                if [[ -n "$ip" ]]; then
                    db_setting ip "$ip"
@@ -5831,10 +5019,9 @@ menu_system() {
                    oc_warn "检测失败（可手动 db 设置）"
                fi
                oc_pause ;;
-            6) oc_kv "脚本版本" "$OC_VERSION"
+            5) oc_kv "脚本版本" "$OC_VERSION"
                oc_kv "系统" "$OC_OS_ID $OC_OS_VER"
                oc_kv "架构" "$OC_ARCH"
-               oc_kv "防火墙后端" "$(net_fw_backend)"
                oc_kv "内核目录" "$OC_BIN_DIR"
                oc_kv "公网 IP" "$(db_setting ip)"
                oc_pause ;;
@@ -5842,24 +5029,6 @@ menu_system() {
     done
 }
 
-_sys_open_ports() {
-    local k port
-    for k in "${OC_PROTOS[@]}"; do
-        db_is_installed "$k" || continue
-        port="$(db_get "$k" port "")"
-        [[ -z "$port" ]] && continue
-        # 传输方式按协议实际监听决定：HY2 仅 UDP，SS-Rust 两者都要，其余 TCP
-        case "$k" in
-            hysteria2)
-                net_fw_allow "$port" udp "oneclick-$k" && oc_ok "放行 $(oc_title_of "$k") udp/$port" ;;
-            ss_rust)
-                net_fw_allow "$port" tcp "oneclick-$k" && oc_ok "放行 $(oc_title_of "$k") tcp/$port"
-                net_fw_allow "$port" udp "oneclick-$k" && oc_ok "放行 $(oc_title_of "$k") udp/$port" ;;
-            *)
-                net_fw_allow "$port" tcp "oneclick-$k" && oc_ok "放行 $(oc_title_of "$k") tcp/$port" ;;
-        esac
-    done
-}
 
 # ---------- 6. 备份 / 恢复 / 卸载 ----------
 
@@ -5915,35 +5084,19 @@ _bk_uninstall_all() {
     oc_ok "全部协议已卸载"
 }
 
-# 彻底卸载：协议、unit、防火墙快照、私有内核、配置、脚本入口、acme 残留。
+# 彻底卸载：协议、unit、私有内核、配置、脚本入口、acme 残留。
 # 只删本脚本自己创建的东西；用户原有的服务与二进制（如 snell-server.service）不碰。
 _bk_purge() {
-    oc_confirm "彻底卸载：删除全部协议、/etc/oneclick、私有内核与脚本入口，确认？" n || return 0
+    local ans
+    oc_warn "彻底卸载会删除全部协议、/etc/oneclick、私有内核、脚本入口与 acme 续期任务。"
+    ans="$(oc_ask "输入 PURGE 确认（其他任意输入取消）" "")"
+    [[ "$ans" == "PURGE" ]] || { oc_info "已取消"; return 0; }
     local k t ch line bin_root_abs
     for k in "${OC_PROTOS[@]}"; do
         if db_has "$k" || db_is_installed "$k"; then
             OC_YES=1 oc_call "$k" uninstall >/dev/null 2>&1 || true
         fi
     done
-    # 防火墙：先删 oneclick-* 规则，再停掉持久化单
-    for t in iptables ip6tables; do
-        command -v "$t" >/dev/null 2>&1 || continue
-        for ch in INPUT FORWARD; do
-            "$t" -S "$ch" 2>/dev/null | grep -F 'oneclick-' | while IFS= read -r line; do
-                read -r -a __a <<< "$line"
-                [[ "${__a[0]:-}" == "-A" ]] || continue
-                "$t" -D "${__a[@]:1}" >/dev/null 2>&1 || true
-            done
-        done
-        "$t" -t nat -S PREROUTING 2>/dev/null | grep -F 'oneclick-hop' | while IFS= read -r line; do
-            read -r -a __a <<< "$line"
-            [[ "${__a[0]:-}" == "-A" ]] || continue
-            "$t" -t nat -D "${__a[@]:1}" >/dev/null 2>&1 || true
-        done
-    done
-    command -v nft >/dev/null 2>&1 && nft delete table inet oneclick >/dev/null 2>&1 || true
-    svc_remove "$OC_FW_UNIT"
-    rm -f -- "$OC_FW_FILE"
     # 旧版本留下的 BBR/TFO 调优文件（新版本不再写 sysctl）
     rm -f -- /etc/sysctl.d/99-oneclick-bbr.conf
     # acme.sh：只有本脚本装过才清续期任务与目录
@@ -5959,7 +5112,7 @@ _bk_purge() {
     bin_root_abs="$OC_BIN_ROOT"
     [[ -n "$bin_root_abs" && "$bin_root_abs" != "/" ]] && rm -rf -- "$bin_root_abs"
     rm -f -- "$OC_ENTRY" "$OC_ENTRY_DIR/oc"
-    oc_ok "已彻底卸载（内核、配置、unit、防火墙快照、脚本入口均已清理）"
+    oc_ok "已彻底卸载（内核、配置、unit、脚本入口均已清理）"
 }
 
 # ---------- 7. 更新 ----------

@@ -12,9 +12,9 @@ ss -lntup | head -20                 # 记录现有 443/80 是否被占
 systemctl --version | head -1        # 记录 systemd 版本
 ```
 
-**记录基线**：`ss -lntup` 与 `nft list ruleset`（或 `iptables-save`）各存一份，测试完对比"是否只增删了 oneclick- 规则"。
+**记录基线**：`ss -lntup` 与 `nft list ruleset`（或 `iptables-save`）各存一份；本脚本不改防火墙，测试完这两份应与基线**完全一致**（唯一例外是 hy2 端口跳跃，见 10.7）。
 
-**端口前提**：VLESS-Reality 需要 443 独占；AnyTLS / Hysteria2 需要高位 TCP / UDP 端口；ACME 模式还需要 80 空闲。首次安装会下载 xray / hysteria / snell-server / ssserver / sing-box，合计约 60~90 MB，慢的话在菜单「系统工具 → 6 镜像前缀」里配 gh_proxy。
+**端口前提**：VLESS-Reality 需要 443 独占；AnyTLS / Hysteria2 需要高位 TCP / UDP 端口；ACME 模式还需要 80 空闲。首次安装会下载 xray / hysteria / snell-server / ssserver / sing-box，合计约 60~90 MB，慢的话在菜单「系统工具 → 3 镜像前缀」里配 gh_proxy。
 
 ## 1. 安装脚本本体
 
@@ -74,9 +74,9 @@ ls /etc/systemd/system/oneclick-anytls.service 2>/dev/null || echo UNIT_CLEAN  #
 ## 5. 系统工具
 
 ```bash
-oneclick   # 菜单 5
-# 5.2 防火墙放行：期望只多出 oneclick- 开头的规则
- nft list ruleset 2>/dev/null | grep -i oneclick || iptables-save | grep oneclick
+oneclick   # 菜单 5（只有 5 项：依赖 / 端口 / 镜像 / 重测 IP / 本机信息）
+# 5.1 菜单里不应再有"防火墙放行"项；装完协议后防火墙基线也不应变
+diff <(nft list ruleset 2>/dev/null) /tmp/nft.baseline 2>/dev/null || iptables-save | diff - /tmp/ipt.baseline
 # 脚本不调内核参数：不应存在 OneClick 写的 sysctl 文件（老版本升级上来的话顺手删掉）
 ls /etc/sysctl.d/99-oneclick-bbr.conf 2>/dev/null && echo "旧残留，建议删除" || echo SYSCTL_CLEAN
 # 补装依赖只装缺失项：已装齐时应当 0 次 apt 安装（看输出里没有"安装系统依赖"）
@@ -153,21 +153,18 @@ systemctl is-enabled oneclick-vless-reality oneclick-hysteria2 oneclick-snell on
 # 10.6 订阅产物必须是 600，且四种格式齐全
 stat -c '%a %n' /etc/oneclick/sub/* && oneclick --sub
 
-# 10.7 端口跳跃：装 hy2 时启用 20000-20100，规则必须带 oneclick-hop 注释且能计数
-iptables -t nat -L PREROUTING -v -n | grep oneclick-hop
-# 从另一台机器发一个 UDP 包，上面的 pkts 计数应 +1
-printf x | nc -u -w1 <服务器IP> 20050
+# 10.7 端口跳跃：装 hy2 时启用 20000-20100；转发规则由 hysteria 自己创建/清理（脚本不写规则）
+nft list ruleset 2>/dev/null | grep -i "hysteria_" || iptables -t nat -S | grep -i hysteria
+# 页面里能看到 hysteria_<hash> 的 table（或 iptables 的 REDIRECT 规则）；卸载/停止 hy2 后应全部消失
 
 # 10.8 ShadowTLS 真实连通（需要客户端支持 v3 strict，例如 mihomo）
 # 服务端只需确认配置里 fallback 与 dispatch 指向同一个伪装域名
 jq -c '.server.tls_addr' /etc/oneclick/ss_rust/shadowtls.json
 
-# 10.9 重启后防火墙规则自动恢复（没装 iptables-persistent 也不丢）
-systemctl is-enabled oneclick-firewall     # enabled
-cat /etc/oneclick/firewall.sh              # 只含带 oneclick- comment 的规则
+# 10.9 重启后：不应存在 oneclick-firewall 单元，hy2 跳跃规则由 hysteria 自建
+systemctl status oneclick-firewall 2>&1 | head -1   # 期望：Unit oneclick-firewall.service could not be found
 reboot
-iptables -S | grep -c oneclick             # 条数应与重启前一致
-iptables -t nat -S | grep oneclick-hop     # 端口跳跃规则也在
+nft list ruleset 2>/dev/null | grep -ci "hysteria_" || iptables -t nat -S | grep -ci hysteria   # 期望 ≥1（开了跳跃时）
 
 # 10.10 Loon
 cat /etc/oneclick/sub/oneclick-loon.conf
@@ -218,6 +215,8 @@ ShadowTLS 使用要点（实测踩坑，2026-11-09）：
 - `--yes` 重装已安装协议会直接失败并提示先 `--uninstall`，这是为了避免脚本化误覆盖
 - 自签证书（`--cert-mode self`）每次安装都会重签，客户端需要重新导入 `insecure` 链接
 - AnyTLS 卸载保留 sing-box 二进制，VLESS 卸载默认保留 xray（其它面板可能共用）
-- 防火墙规则会写成 `/etc/oneclick/firewall.sh` 并由 `oneclick-firewall.service` 在开机时重放；
-  只重放带 `oneclick-` comment 的规则，不会覆盖 ufw/firewalld/nft 自己的策略
-- 全部协议卸载后，`oneclick-firewall.service` 与 `firewall.sh` 会自动移除
+- 脚本完全不改防火墙：不写 iptables / nftables / firewalld / ufw 规则，也不创建开机重放单元；
+  端口是否可达由你自己的防火墙策略决定。唯一例外是 hy2 端口跳跃，规则由 hysteria 自己按
+  `listen: :8443,20000-20100` 创建并在进程退出时清理
+- `oneclick --purge` 会清掉脚本创建的一切（协议、unit、`/etc/oneclick`、`/opt/oneclick`、入口软链、
+  acme 续期任务），必须先手动输入 `PURGE` 才执行

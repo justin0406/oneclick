@@ -20,8 +20,6 @@ OC_BIN_DIR="${OC_BIN_DIR:-$OC_BIN_ROOT/bin}"
 OC_ENTRY_DIR="${OC_ENTRY_DIR:-/usr/local/bin}"
 OC_ENTRY="$OC_ENTRY_DIR/oneclick"
 OC_UNIT_DIR="${OC_UNIT_DIR:-/etc/systemd/system}"
-OC_FW_FILE="$OC_ROOT/firewall.sh"
-OC_FW_UNIT="oneclick-firewall"
 
 OC_OS_ID=""
 OC_OS_VER=""

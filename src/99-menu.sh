@@ -144,10 +144,7 @@ _menu_change_port() {
     [[ "$(oc_meta_field "$k" udp)" == "yes" ]] && proto="udp"
     net_port_in_use "$new" "$proto" && { oc_err "端口 $new 已被占用"; return 1; }
     db_set "$k" port "$new"
-    # 防火墙：先放行新端口，重生成成功后再撤旧端口
-    net_fw_allow "$new" "$proto" "oneclick-$k" >/dev/null 2>&1
     if oc_call "$k" regen; then
-        net_fw_deny "$old" "$proto" "oneclick-$k" >/dev/null 2>&1
         oc_ok "端口已改为 $new"
     else
         db_set "$k" port "$old"
@@ -175,7 +172,7 @@ _menu_change_pw() {
 
 _menu_delete() {
     local k="$1"
-    oc_confirm "确认删除 $(oc_title_of "$k")（配置与防火墙规则一并清理）？" n || return 1
+    oc_confirm "确认删除 $(oc_title_of "$k")（配置一并清理）？" n || return 1
     oc_call "$k" uninstall
     return 0
 }
@@ -253,7 +250,6 @@ menu_system() {
         local c
         c="$(oc_menu "系统工具" \
             "补装缺失的基础依赖" \
-            "防火墙：放行已装协议端口" \
             "查询端口占用" \
             "设置 GitHub 镜像前缀" \
             "重新检测公网 IP" \
@@ -261,16 +257,15 @@ menu_system() {
         case "$c" in
             0) return 0 ;;
             1) os_dep_install base && oc_ok "依赖就绪（只装缺失项）"; oc_pause ;;
-            2) _sys_open_ports; oc_pause ;;
-            3) local p
+            2) local p
                p="$(oc_ask "端口号" "")"
                [[ -n "$p" ]] && { net_port_in_use "$p" tcp && oc_warn "TCP $p 已占用" || oc_ok "TCP $p 空闲"
                                    net_port_in_use "$p" udp && oc_warn "UDP $p 已占用" || oc_ok "UDP $p 空闲"; }
                oc_pause ;;
-            4) local m
+            3) local m
                m="$(oc_ask "镜像前缀（如 https://gh-proxy.net，留空则直连）" "$(db_setting gh_proxy)")"
                db_setting gh_proxy "$m" && oc_ok "已保存：${m:-直连}"; oc_pause ;;
-            5) local ip
+            4) local ip
                ip="$(net_primary_ip)"
                if [[ -n "$ip" ]]; then
                    db_setting ip "$ip"
@@ -279,10 +274,9 @@ menu_system() {
                    oc_warn "检测失败（可手动 db 设置）"
                fi
                oc_pause ;;
-            6) oc_kv "脚本版本" "$OC_VERSION"
+            5) oc_kv "脚本版本" "$OC_VERSION"
                oc_kv "系统" "$OC_OS_ID $OC_OS_VER"
                oc_kv "架构" "$OC_ARCH"
-               oc_kv "防火墙后端" "$(net_fw_backend)"
                oc_kv "内核目录" "$OC_BIN_DIR"
                oc_kv "公网 IP" "$(db_setting ip)"
                oc_pause ;;
@@ -290,24 +284,6 @@ menu_system() {
     done
 }
 
-_sys_open_ports() {
-    local k port
-    for k in "${OC_PROTOS[@]}"; do
-        db_is_installed "$k" || continue
-        port="$(db_get "$k" port "")"
-        [[ -z "$port" ]] && continue
-        # 传输方式按协议实际监听决定：HY2 仅 UDP，SS-Rust 两者都要，其余 TCP
-        case "$k" in
-            hysteria2)
-                net_fw_allow "$port" udp "oneclick-$k" && oc_ok "放行 $(oc_title_of "$k") udp/$port" ;;
-            ss_rust)
-                net_fw_allow "$port" tcp "oneclick-$k" && oc_ok "放行 $(oc_title_of "$k") tcp/$port"
-                net_fw_allow "$port" udp "oneclick-$k" && oc_ok "放行 $(oc_title_of "$k") udp/$port" ;;
-            *)
-                net_fw_allow "$port" tcp "oneclick-$k" && oc_ok "放行 $(oc_title_of "$k") tcp/$port" ;;
-        esac
-    done
-}
 
 # ---------- 6. 备份 / 恢复 / 卸载 ----------
 
@@ -363,35 +339,19 @@ _bk_uninstall_all() {
     oc_ok "全部协议已卸载"
 }
 
-# 彻底卸载：协议、unit、防火墙快照、私有内核、配置、脚本入口、acme 残留。
+# 彻底卸载：协议、unit、私有内核、配置、脚本入口、acme 残留。
 # 只删本脚本自己创建的东西；用户原有的服务与二进制（如 snell-server.service）不碰。
 _bk_purge() {
-    oc_confirm "彻底卸载：删除全部协议、/etc/oneclick、私有内核与脚本入口，确认？" n || return 0
+    local ans
+    oc_warn "彻底卸载会删除全部协议、/etc/oneclick、私有内核、脚本入口与 acme 续期任务。"
+    ans="$(oc_ask "输入 PURGE 确认（其他任意输入取消）" "")"
+    [[ "$ans" == "PURGE" ]] || { oc_info "已取消"; return 0; }
     local k t ch line bin_root_abs
     for k in "${OC_PROTOS[@]}"; do
         if db_has "$k" || db_is_installed "$k"; then
             OC_YES=1 oc_call "$k" uninstall >/dev/null 2>&1 || true
         fi
     done
-    # 防火墙：先删 oneclick-* 规则，再停掉持久化单
-    for t in iptables ip6tables; do
-        command -v "$t" >/dev/null 2>&1 || continue
-        for ch in INPUT FORWARD; do
-            "$t" -S "$ch" 2>/dev/null | grep -F 'oneclick-' | while IFS= read -r line; do
-                read -r -a __a <<< "$line"
-                [[ "${__a[0]:-}" == "-A" ]] || continue
-                "$t" -D "${__a[@]:1}" >/dev/null 2>&1 || true
-            done
-        done
-        "$t" -t nat -S PREROUTING 2>/dev/null | grep -F 'oneclick-hop' | while IFS= read -r line; do
-            read -r -a __a <<< "$line"
-            [[ "${__a[0]:-}" == "-A" ]] || continue
-            "$t" -t nat -D "${__a[@]:1}" >/dev/null 2>&1 || true
-        done
-    done
-    command -v nft >/dev/null 2>&1 && nft delete table inet oneclick >/dev/null 2>&1 || true
-    svc_remove "$OC_FW_UNIT"
-    rm -f -- "$OC_FW_FILE"
     # 旧版本留下的 BBR/TFO 调优文件（新版本不再写 sysctl）
     rm -f -- /etc/sysctl.d/99-oneclick-bbr.conf
     # acme.sh：只有本脚本装过才清续期任务与目录
@@ -407,7 +367,7 @@ _bk_purge() {
     bin_root_abs="$OC_BIN_ROOT"
     [[ -n "$bin_root_abs" && "$bin_root_abs" != "/" ]] && rm -rf -- "$bin_root_abs"
     rm -f -- "$OC_ENTRY" "$OC_ENTRY_DIR/oc"
-    oc_ok "已彻底卸载（内核、配置、unit、防火墙快照、脚本入口均已清理）"
+    oc_ok "已彻底卸载（内核、配置、unit、脚本入口均已清理）"
 }
 
 # ---------- 7. 更新 ----------

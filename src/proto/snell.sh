@@ -58,12 +58,6 @@ ocp_snell_unit() {
     oc_unit_name snell
 }
 
-# 防火墙规则 tag：与 99-menu.sh 的 "oneclick-$key" 完全一致，
-# 这样菜单改端口时放的规则和本文件撤销的规则能对上，不会各留一份。
-ocp_snell_tag() {
-    printf 'oneclick-snell'
-}
-
 # 默认端口：状态库已有值就沿用（重装/改端口后再装都保持同一个入口）
 ocp_snell_default_port() {
     local port
@@ -288,14 +282,6 @@ proto_snell_install() {
     fi
     oc_ok "服务已启动：$unit"
 
-    # 7. 防火墙：Snell 只有 TCP。先按 tag 撤旧规则再放行，重跑不叠加
-    net_fw_deny "$port" tcp "$(ocp_snell_tag)" >/dev/null 2>&1 || true
-    net_fw_allow "$port" tcp "$(ocp_snell_tag)" >/dev/null 2>&1 ||
-        oc_warn "防火墙放行 TCP/${port} 失败，请手动检查"
-    if [[ -n "$old_port" && "$old_port" != "$port" ]]; then
-        net_fw_deny "$old_port" tcp "$(ocp_snell_tag)" >/dev/null 2>&1 || true
-    fi
-
     # 8. 状态库：所有字段一次写全，最后才 mark_installed（失败时不会留下"已安装"假象）
     db_set snell port "$port"
     db_set snell psk "$psk"
@@ -345,10 +331,6 @@ proto_snell_uninstall() {
 
     svc_remove "$unit"
     oc_ok "已停止并移除服务：$unit"
-    if [[ -n "$port" ]]; then
-        net_fw_deny "$port" tcp "$(ocp_snell_tag)" >/dev/null 2>&1 ||
-            oc_warn "撤销 TCP/${port} 放行失败，请手动检查"
-    fi
     # 默认一并删除；但若用户原有的 snell-server.service（或其他面板）还引用同一路径，
     # 删掉会让别人的服务重启后起不来，此时保留并说明。
     if svc_bin_referenced "$bin"; then
@@ -448,13 +430,6 @@ proto_snell_regen() {
         oc_err "重启后服务未运行，最近日志："
         svc_logs "$unit" 30 >&2
         return 1
-    fi
-
-    # 防火墙补齐（菜单改端口只按 meta 放行了一个协议，这里统一对齐）
-    net_fw_deny "$port" tcp "$(ocp_snell_tag)" >/dev/null 2>&1 || true
-    net_fw_allow "$port" tcp "$(ocp_snell_tag)" >/dev/null 2>&1 || true
-    if [[ -n "$old_port" && "$old_port" != "$port" ]]; then
-        net_fw_deny "$old_port" tcp "$(ocp_snell_tag)" >/dev/null 2>&1 || true
     fi
 
     oc_ok "配置已重生成并重启：$cfg"

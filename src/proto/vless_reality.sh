@@ -162,8 +162,6 @@ ocp_vless_reality_ip() {
     printf '%s' "$ip"
 }
 
-ocp_vless_reality_fw_comment() { printf 'oneclick-vless-reality'; }
-
 proto_vless_reality_meta() {
     local port
     port="$(db_get vless_reality port "")"
@@ -283,8 +281,6 @@ proto_vless_reality_install() {
     oc_ok "服务已启动：$unit"
 
     # 先按 comment 删旧规则再放行，重装/重跑不会叠加
-    net_fw_deny "$port" tcp "$(ocp_vless_reality_fw_comment)" >/dev/null 2>&1 || true
-    net_fw_allow "$port" tcp "$(ocp_vless_reality_fw_comment)" || oc_warn "防火墙放行失败，请手动放行 $port/tcp"
 
     db_set "$key" port "$port"
     db_set "$key" server_name "$sni"
@@ -345,7 +341,6 @@ proto_vless_reality_uninstall() {
         oc_ok "已删除配置目录：$dir"
     fi
 
-    net_fw_deny "$port" tcp "$(ocp_vless_reality_fw_comment)" || oc_warn "撤销防火墙规则失败，请手动检查 $port/tcp"
     db_del "$key"
     db_unmark_installed "$key"
     oc_ok "VLESS-Reality 已卸载"
@@ -448,8 +443,6 @@ proto_vless_reality_regen() {
         svc_logs "$unit" 30 >&2
         oc_die "配置已重写但服务未起来，请检查日志"
     fi
-    net_fw_deny "$port" tcp "$(ocp_vless_reality_fw_comment)" >/dev/null 2>&1 || true
-    net_fw_allow "$port" tcp "$(ocp_vless_reality_fw_comment)" >/dev/null 2>&1 || true
     oc_ok "配置已重写并重启：$cfg"
     proto_vless_reality_status
 }

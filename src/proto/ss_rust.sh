@@ -67,16 +67,6 @@ ocp_ssrust_stls_unit() {
     printf '%s' "$(oc_unit_name ss_rust)-shadowtls"
 }
 
-# 防火墙 tag 与 99-menu.sh 的 "oneclick-$key" 对齐；ShadowTLS 入口另用一个 tag，
-# 这样卸载/改端口时能分别精确撤销，不会误删直连端口的规则。
-ocp_ssrust_tag() {
-    printf 'oneclick-ss_rust'
-}
-
-ocp_ssrust_stls_tag() {
-    printf 'oneclick-ss_rust-shadowtls'
-}
-
 ocp_ssrust_default_port() {
     local port
     port="$(db_get ss_rust port "")"
@@ -623,28 +613,7 @@ proto_ss_rust_install() {
         oc_ok "已移除旧的 ShadowTLS 服务：$stl_unit"
     fi
 
-    # 9. 防火墙：SS 的 TCP 与 UDP 都要（UDP 中继），ShadowTLS 入口只 TCP。
-    #    先按 tag 撤旧规则再放行，重跑不叠加。
-    net_fw_deny "$port" tcp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-    net_fw_allow "$port" tcp "$(ocp_ssrust_tag)" >/dev/null 2>&1 ||
-        oc_warn "防火墙放行 TCP/${port} 失败，请手动检查"
-    net_fw_deny "$port" udp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-    net_fw_allow "$port" udp "$(ocp_ssrust_tag)" >/dev/null 2>&1 ||
-        oc_warn "防火墙放行 UDP/${port} 失败，请手动检查（UDP 中继不可用）"
-    if [[ -n "$old_port" && "$old_port" != "$port" ]]; then
-        net_fw_deny "$old_port" tcp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-        net_fw_deny "$old_port" udp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-    fi
-    if [[ "$stls" == "yes" ]]; then
-        net_fw_deny "$stls_port" tcp "$(ocp_ssrust_stls_tag)" >/dev/null 2>&1 || true
-        net_fw_allow "$stls_port" tcp "$(ocp_ssrust_stls_tag)" >/dev/null 2>&1 ||
-            oc_warn "防火墙放行 TCP/${stls_port} 失败，请手动检查"
-    fi
-    if [[ -n "$old_stls_port" && "$old_stls_port" != "$stls_port" ]]; then
-        net_fw_deny "$old_stls_port" tcp "$(ocp_ssrust_stls_tag)" >/dev/null 2>&1 || true
-    fi
-
-    # 10. 状态库：字段一次写全，最后才 mark_installed
+    # 9. 状态库：字段一次写全，最后才 mark_installed
     db_set ss_rust port "$port"
     db_set ss_rust method "$method"
     db_set ss_rust password "$password"
@@ -701,7 +670,7 @@ proto_ss_rust_uninstall() {
         return 0
     fi
     if [[ "${OC_YES:-0}" != "1" ]]; then
-        oc_confirm "确认卸载 SS-Rust（停止服务、删除配置与防火墙规则）？" n || {
+        oc_confirm "确认卸载 SS-Rust（停止服务并删除配置）？" n || {
             oc_info "已取消"
             return 0
         }
@@ -717,14 +686,6 @@ proto_ss_rust_uninstall() {
     svc_remove "$stl_unit"
     svc_remove "$unit"
     oc_ok "已停止并移除服务：${unit} ${stl_unit}"
-    if [[ -n "$port" ]]; then
-        net_fw_deny "$port" tcp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-        net_fw_deny "$port" udp "$(ocp_ssrust_tag)" >/dev/null 2>&1 ||
-            oc_warn "撤销 UDP/${port} 放行失败，请手动检查"
-    fi
-    if [[ -n "$stls_port" ]]; then
-        net_fw_deny "$stls_port" tcp "$(ocp_ssrust_stls_tag)" >/dev/null 2>&1 || true
-    fi
     # 两个二进制都只服务本协议，默认删除（OC_YES=1 按默认 yes 删，避免留孤儿）
     if svc_bin_referenced "$(ocp_ssrust_bin)" || svc_bin_referenced "$(ocp_ssrust_stls_bin)"; then
         oc_warn "检测到其他 systemd 服务仍在引用 ssserver/shadow-tls，保留不删"
@@ -910,23 +871,6 @@ proto_ss_rust_regen() {
         # 状态库里已关掉 ShadowTLS，但旧单元还在：清掉，别让它继续占端口
         svc_remove "$stl_unit"
         oc_ok "已移除旧的 ShadowTLS 服务：$stl_unit"
-    fi
-
-    # 防火墙补齐：菜单改端口时只放行了一个协议，这里把 tcp/udp/入口都对一遍
-    net_fw_deny "$port" tcp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-    net_fw_allow "$port" tcp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-    net_fw_deny "$port" udp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-    net_fw_allow "$port" udp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-    if [[ -n "$old_port" && "$old_port" != "$port" ]]; then
-        net_fw_deny "$old_port" tcp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-        net_fw_deny "$old_port" udp "$(ocp_ssrust_tag)" >/dev/null 2>&1 || true
-    fi
-    if [[ "$shadowtls" == "yes" ]]; then
-        net_fw_deny "$stls_port" tcp "$(ocp_ssrust_stls_tag)" >/dev/null 2>&1 || true
-        net_fw_allow "$stls_port" tcp "$(ocp_ssrust_stls_tag)" >/dev/null 2>&1 || true
-    fi
-    if [[ -n "$old_stls_port" && "$old_stls_port" != "$stls_port" ]]; then
-        net_fw_deny "$old_stls_port" tcp "$(ocp_ssrust_stls_tag)" >/dev/null 2>&1 || true
     fi
 
     oc_ok "配置已重生成并重启：$cfg"

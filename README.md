@@ -61,9 +61,10 @@ Adding a protocol means adding one file and registering one key.
 you already have), `acme` (acme.sh HTTP-01), or `self` (EC P-256 with SAN). A missing certificate never
 silently becomes a random throwaway one — installation stops at the certificate step and asks.
 
-**Nothing outside its own scope is touched.** No flushing of whole iptables/nft tables, no
-`chmod -R 777`, no edits to the system SSH configuration. Firewall rules are added and removed only
-with the `oneclick-` comment, and nft uses its own `inet oneclick` table.
+**Nothing outside its own scope is touched.** No firewall changes — the script never writes
+iptables / nftables / firewalld / ufw rules, so your firewall policy stays yours. No `chmod -R 777`,
+no edits to the system SSH configuration, no sysctl tuning. Only exception: if you enable Hysteria2
+port hopping, hysteria itself installs and cleans up the redirect rules for its `listen` port range.
 
 **Downloads are verifiable.** All binaries go through one download layer: three retries, an optional
 mirror prefix (`OC_GH_PROXY`), SHA-256 verification when a digest is available, and rollback on failure
@@ -71,6 +72,7 @@ so no half-written file is left behind.
 
 **Uninstall means uninstall.** Services are stopped, disabled, their units removed, and
 `daemon-reload` is run. Configs and certificates are kept only if you explicitly say so.
+`oneclick --purge` removes everything it ever created and requires typing `PURGE` to confirm.
 
 **Single user by design.** No multi-user accounts, traffic accounting, expiry dates or Telegram bot —
 those belong in a panel. This script's job is to install and operate one machine's proxies well.
