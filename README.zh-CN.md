@@ -83,7 +83,7 @@ sudo oc --link snell --format surge
 `oc --sub` 会为已安装的协议生成四种产物，直接导入对应客户端或挂到自己的订阅服务：
 
 - `sub/oneclick-clash.yaml` — Clash / mihomo（注意：mihomo 仅支持 Snell v1–v5，v6 请用 Surge 或 sing-box）
-- `sub/oneclick-surge.conf` — Surge
+- `sub/oneclick-surge.conf` — Surge（不含 VLESS-Reality：Surge 没有 VLESS 策略类型，该节点请用 Clash 或 sing-box 产物）
 - `sub/oneclick-singbox.json` — sing-box
 - `sub/oneclick-uri.txt` — 通用 URI 列表，可生成二维码
 

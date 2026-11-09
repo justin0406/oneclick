@@ -500,12 +500,17 @@ proto_hysteria2_clash() {
 }
 
 proto_hysteria2_surge() {
-    local pw port sni line
+    local pw port sni hop line
     pw="$(db_get hysteria2 password "")"
     port="$(db_get hysteria2 port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get hysteria2 sni bing.com)"
+    hop="$(db_get hysteria2 hop "")"
     line="$(ocp_hy2_name) = hysteria2, $(ocp_hy2_ip), ${port}, password=${pw}, sni=${sni}"
+    # Surge 手册 policies/hysteria2.html：port-hopping 用分号分隔，设置后忽略主端口
+    if [[ -n "$hop" ]]; then
+        line+=", port-hopping=${hop}"
+    fi
     if [[ "$(ocp_hy2_insecure)" == "1" ]]; then
         line+=", skip-cert-verify=true"
     fi

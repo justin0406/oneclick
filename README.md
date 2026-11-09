@@ -94,7 +94,7 @@ those belong in a panel. This script's job is to install and operate one machine
 `oc --sub` renders client configs for every installed protocol:
 
 - `sub/oneclick-clash.yaml` — Clash / mihomo (note: mihomo supports Snell v1–v5 only; use Surge or sing-box for v6)
-- `sub/oneclick-surge.conf` — Surge
+- `sub/oneclick-surge.conf` — Surge (VLESS-Reality is omitted here: Surge has no VLESS policy type; use the Clash or sing-box file for that node)
 - `sub/oneclick-singbox.json` — sing-box
 - `sub/oneclick-uri.txt` — plain URI list, also usable for QR codes
 

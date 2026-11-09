@@ -2195,6 +2195,9 @@ share_render_surge() {
     local -a frags=() names=()
     for key in "${OC_PROTOS[@]}"; do
         db_is_installed "$key" || continue
+        # Surge 没有 VLESS 策略类型（手册 policies/ 下无 vless 页），REALITY 节点只输出到
+        # Clash / sing-box；这里跳过而不是写一行 Surge 解析不了的配置。
+        [[ "$key" == "vless_reality" ]] && continue
         fn="$(_share_fn "$key" surge)"
         if ! frag="$("$fn")"; then
             oc_warn "跳过 $key：Surge 节点生成失败（缺公网 IP 或状态库字段不全）"
@@ -3444,12 +3447,17 @@ proto_hysteria2_clash() {
 }
 
 proto_hysteria2_surge() {
-    local pw port sni line
+    local pw port sni hop line
     pw="$(db_get hysteria2 password "")"
     port="$(db_get hysteria2 port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get hysteria2 sni bing.com)"
+    hop="$(db_get hysteria2 hop "")"
     line="$(ocp_hy2_name) = hysteria2, $(ocp_hy2_ip), ${port}, password=${pw}, sni=${sni}"
+    # Surge 手册 policies/hysteria2.html：port-hopping 用分号分隔，设置后忽略主端口
+    if [[ -n "$hop" ]]; then
+        line+=", port-hopping=${hop}"
+    fi
     if [[ "$(ocp_hy2_insecure)" == "1" ]]; then
         line+=", skip-cert-verify=true"
     fi
