@@ -46,12 +46,12 @@ ocp_vless_reality_keys() {
     printf '%s\n%s\n' "$priv" "$pub"
 }
 
-# 端口协商：OC_ARG_PORT > 交互（默认 443）；占用时提示换端口，443 建议独占。
+# 端口协商：OC_ARG_PORT > 交互（默认随机高位端口）；占用时提示换端口。
 ocp_vless_reality_port() {
     local port="${OC_ARG_PORT:-}" alt def
-    # 契约顺序：OC_ARG_PORT -> meta 的 port -> 交互；meta 未装时给 443
+    # 契约顺序：OC_ARG_PORT -> meta 的 port -> 交互；meta 未装时随机取高位端口
     def="$(proto_vless_reality_meta | sed -n 's/^port=//p')"
-    [[ -z "$def" ]] && def="443"
+    [[ -z "$def" ]] && def="$(net_port_random)"
     if [[ -z "$port" ]]; then
         port="$(ocp_vless_reality_ask "REALITY 监听端口" "$def")"
     fi
@@ -60,11 +60,11 @@ ocp_vless_reality_port() {
     ((port >= 1 && port <= 65535)) || oc_die "端口超出范围：$port"
     if net_port_in_use "$port" tcp; then
         if [[ -n "$OC_ARG_PORT" ]]; then
-            alt="$(net_port_pick 443 tcp)"
-            oc_die "端口 $port 已被占用（--port 指定）；可换空闲端口，例如 --port ${alt:-8443}"
+            alt="$(net_port_pick "$port" tcp)"
+            oc_die "端口 $port 已被占用（--port 指定）；可换空闲端口，例如 --port ${alt:-$def}"
         fi
-        oc_warn "端口 $port 已被占用；443 被占时 VLESS-Reality 建议换端口独占 443"
-        alt="$(net_port_pick 443 tcp)"
+        oc_warn "端口 $port 已被占用；VLESS-Reality 需要一个独占端口"
+        alt="$(net_port_pick "$port" tcp)"
         [[ -z "$alt" || "$alt" == "$port" ]] && oc_die "找不到可用端口，已取消安装"
         if ! oc_confirm "改用空闲端口 $alt ？" y; then
             oc_die "已取消安装"
@@ -165,9 +165,8 @@ ocp_vless_reality_ip() {
 proto_vless_reality_meta() {
     local port
     port="$(db_get vless_reality port "")"
-    [[ -z "$port" ]] && port="443"
     printf 'title=%s\n' "${OC_PROTO_TITLE[vless_reality]:-VLESS-Reality}"
-    printf 'desc=%s\n' "Xray-core REALITY 抗封锁强，无需证书，建议独占 443"
+    printf 'desc=%s\n' "Xray-core REALITY 抗封锁强，无需证书，建议独占端口"
     printf 'port=%s\n' "$port"
     printf 'udp=no\n'
     printf 'cert=no\n'
@@ -195,7 +194,7 @@ proto_vless_reality_install() {
     oc_title "安装 VLESS-Reality"
     os_dep_install base || oc_die "系统依赖安装失败"
 
-    # 端口先判（443 通常独占），避免下载完才发现被占用
+    # 端口先判，避免下载完才发现被占用
     port="$(ocp_vless_reality_port)" || return 1
 
     bin="$OC_BIN_DIR/xray"
@@ -306,7 +305,7 @@ proto_vless_reality_install() {
     oc_info "分享链接（可导入 v2rayN / NekoBox / Shadowrocket）："
     # 拿不到公网 IP 不该让整个安装报失败，装好后 oneclick --link 还能再取
     proto_vless_reality_link || oc_warn "暂时取不到公网 IP，稍后用 oneclick --link vless_reality 查看链接"
-    oc_warn "REALITY 依赖真实 443 直连，套 CDN 或前置反代会失效"
+    oc_warn "REALITY 需要客户端直连该端口，套 CDN 或前置反代会失效"
 }
 
 proto_vless_reality_uninstall() {
@@ -323,7 +322,7 @@ proto_vless_reality_uninstall() {
 
     unit="$(oc_unit_name "$key")"
     dir="$(oc_proto_dir "$key")"
-    port="$(db_get "$key" port "443")"
+    port="$(db_get "$key" port "")"
 
     svc_remove "$unit"
     oc_ok "已停止并移除服务：$unit"
@@ -372,7 +371,7 @@ proto_vless_reality_link() {
         return 1
     fi
     uuid="$(db_get "$key" uuid "")"
-    port="$(db_get "$key" port "443")"
+    port="$(db_get "$key" port "")"
     sni="$(db_get "$key" server_name "www.microsoft.com")"
     sid="$(db_get "$key" short_id "")"
     pub="$(db_get "$key" public_key "")"
@@ -454,7 +453,7 @@ proto_vless_reality_clash() {
         return 1
     fi
     ip="$(ocp_vless_reality_ip)"
-    port="$(db_get "$key" port "443")"
+    port="$(db_get "$key" port "")"
     uuid="$(db_get "$key" uuid "")"
     sni="$(db_get "$key" server_name "www.microsoft.com")"
     sid="$(db_get "$key" short_id "")"
@@ -484,7 +483,7 @@ proto_vless_reality_surge() {
         return 1
     fi
     ip="$(ocp_vless_reality_ip)"
-    port="$(db_get "$key" port "443")"
+    port="$(db_get "$key" port "")"
     uuid="$(db_get "$key" uuid "")"
     sni="$(db_get "$key" server_name "www.microsoft.com")"
     sid="$(db_get "$key" short_id "")"
@@ -503,7 +502,7 @@ proto_vless_reality_singbox() {
         return 1
     fi
     ip="$(ocp_vless_reality_ip)"
-    port="$(db_get "$key" port "443")"
+    port="$(db_get "$key" port "")"
     uuid="$(db_get "$key" uuid "")"
     sni="$(db_get "$key" server_name "www.microsoft.com")"
     sid="$(db_get "$key" short_id "")"
@@ -543,7 +542,7 @@ proto_vless_reality_loon() {
         return 1
     fi
     ip="$(ocp_vless_reality_ip)"
-    port="$(db_get "$key" port "443")"
+    port="$(db_get "$key" port "")"
     uuid="$(db_get "$key" uuid "")"
     sni="$(db_get "$key" server_name "www.microsoft.com")"
     sid="$(db_get "$key" short_id "")"

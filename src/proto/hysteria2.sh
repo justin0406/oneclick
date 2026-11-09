@@ -18,7 +18,7 @@ ocp_hy2_cfg() {
 ocp_hy2_default_port() {
     local port
     port="$(db_get hysteria2 port "")"
-    printf '%s' "${port:-8443}"
+    printf '%s' "${port:-$(net_port_random)}"
 }
 
 ocp_hy2_port_ok() {
@@ -165,7 +165,7 @@ ocp_hy2_name() {
 proto_hysteria2_meta() {
     printf 'title=%s\n' "$(ocp_hy2_name)"
     printf 'desc=UDP/QUIC 高丢包抗性协议，支持 salamander 混淆与端口跳跃\n'
-    printf 'port=%s\n' "$(ocp_hy2_default_port)"
+    printf 'port=%s\n' "$(db_get hysteria2 port "")"
     printf 'udp=yes\n'
     printf 'cert=yes\n'
 }
@@ -198,7 +198,7 @@ proto_hysteria2_install() {
     ocp_hy2_port_ok "$port" || oc_die "端口无效：${port:-空}（需 1-65535）"
     port=$((10#$port))
     if net_port_in_use "$port" udp; then
-        oc_die "UDP 端口 ${port} 已被占用；建议改用空闲端口：$(net_port_pick 8443 udp)"
+        oc_die "UDP 端口 ${port} 已被占用；建议改用空闲端口：$(net_port_pick "$defport" udp)"
     fi
 
     # 3. 依赖与二进制
@@ -263,8 +263,11 @@ proto_hysteria2_install() {
     hop=""
     if oc_confirm "是否启用端口跳跃（UDP 端口段，由 hysteria 自身安排转发，停止时自动清理）？" n; then
         local hs he
-        hs="$(oc_ask "端口段起始" 20000)"
-        he="$(oc_ask "端口段结束" 30000)"
+        # 端口段避开主端口：落在 20000-30000 内就改用 40000-50000
+        hs=20000; he=30000
+        if ((port >= hs && port <= he)); then hs=40000; he=50000; fi
+        hs="$(oc_ask "端口段起始" "$hs")"
+        he="$(oc_ask "端口段结束" "$he")"
         hop="$(ocp_hy2_hop_ok "$hs" "$he" || true)"
         if [[ -z "$hop" ]]; then
             oc_warn "端口段无效（需 1-65535 且起始 < 结束），已跳过端口跳跃"

@@ -27,7 +27,7 @@ ocp_anytls_bin() {
 ocp_anytls_default_port() {
     local port
     port="$(db_get anytls port "")"
-    printf '%s' "${port:-8443}"
+    printf '%s' "${port:-$(net_port_random)}"
 }
 
 ocp_anytls_name() {
@@ -180,7 +180,7 @@ ocp_anytls_insecure() {
 proto_anytls_meta() {
     printf 'title=%s\n' "$(ocp_anytls_name)"
     printf 'desc=低特征 TLS 代理（sing-box 实现），支持自签/ACME 证书\n'
-    printf 'port=%s\n' "$(ocp_anytls_default_port)"
+    printf 'port=%s\n' "$(db_get anytls port "")"
     printf 'udp=no\n'
     printf 'cert=yes\n'
 }
@@ -211,7 +211,7 @@ proto_anytls_install() {
     ocp_anytls_port_ok "$port" || oc_die "端口无效：${port:-空}（需 1-65535）"
     port=$((10#$port))
     if net_port_in_use "$port" tcp; then
-        oc_die "TCP 端口 ${port} 已被占用；建议改用空闲端口：$(net_port_pick 8443 tcp)"
+        oc_die "TCP 端口 ${port} 已被占用；建议改用空闲端口：$(net_port_pick "$port" tcp)"
     fi
 
     # 3. 依赖与二进制（sing-box 复用，版本不一致才重下）

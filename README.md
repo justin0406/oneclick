@@ -29,8 +29,8 @@ sudo oc
 Or skip the menu entirely:
 
 ```bash
-sudo oc --install hysteria2 --port 8443 --cert-mode self --yes
-sudo oc --install vless_reality --port 443 --yes
+sudo oc --install hysteria2 --cert-mode self --yes
+sudo oc --install vless_reality --yes
 sudo oc --status
 sudo oc --link snell --format surge
 ```
@@ -39,11 +39,14 @@ sudo oc --link snell --format surge
 
 | Protocol | Server | Port | Certificate | Notes |
 |---|---|---|---|---|
-| VLESS-Reality | xray-core | 443, exclusive | not needed | REALITY + x25519, strongest against active probing; good default |
-| Hysteria2 | hysteria | high UDP | self-signed / ACME / existing | QUIC, good on lossy links; salamander obfuscation and port hopping optional |
-| Snell v6 | snell-server 6.0.0 | high TCP | not needed | single port, PSK auth, native Surge support |
-| SS-Rust | ssserver | TCP + UDP | only for ShadowTLS | SS2022 by default; ShadowTLS v3 (strict) available as an opt-in disguise, off by default. Client must support v3 (e.g. mihomo / Clash Meta) |
-| AnyTLS | sing-box | high TCP | **required**: self-signed / ACME / existing | low-fingerprint TLS proxy; works with Surge, Loon and sing-box clients |
+| VLESS-Reality | xray-core | random high port | not needed | REALITY + x25519, strongest against active probing; good default |
+| Hysteria2 | hysteria | random high UDP | self-signed / ACME / existing | QUIC, good on lossy links; salamander obfuscation and port hopping optional |
+| Snell v6 | snell-server 6.0.0 | random high TCP | not needed | single port, PSK auth, native Surge support |
+| SS-Rust | ssserver | random high TCP + UDP | only for ShadowTLS | SS2022 by default; ShadowTLS v3 (strict) available as an opt-in disguise, off by default. Client must support v3 (e.g. mihomo / Clash Meta) |
+| AnyTLS | sing-box | random high TCP | **required**: self-signed / ACME / existing | low-fingerprint TLS proxy; works with Surge, Loon and sing-box clients |
+
+Ports are picked at random in `20000-60000` on install (verified free for both TCP and UDP), and keep
+their value on reinstall. Pass `--port` to override; a dedicated port is still recommended for REALITY.
 
 > **Why AnyTLS runs on sing-box instead of anytls-go:** the anytls-go server generates its TLS
 > certificate in-process — a one-hour RSA key with no SAN — so it can never use a certificate the

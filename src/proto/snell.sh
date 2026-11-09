@@ -22,9 +22,6 @@
 # 固定版本（升级只改这一处；同时用于下载 URL 与 db.version）
 OC_SNELL_VER="${OC_SNELL_VER:-6.0.0}"
 
-# 默认端口：Snell 上游习惯 2345，保持一致，客户端模板不用改
-OC_SNELL_DEFAULT_PORT="${OC_SNELL_DEFAULT_PORT:-2345}"
-
 # ---------- 内部辅助 ----------
 
 # OC_ARCH -> dl.nssurge.com 的架构段。注意上游叫 aarch64，而 OC_ARCH 叫 arm64
@@ -62,7 +59,7 @@ ocp_snell_unit() {
 ocp_snell_default_port() {
     local port
     port="$(db_get snell port "")"
-    printf '%s' "${port:-$OC_SNELL_DEFAULT_PORT}"
+    printf '%s' "${port:-$(net_port_random)}"
 }
 
 ocp_snell_port_ok() {
@@ -88,8 +85,8 @@ ocp_snell_ask_port() {
         return 1
     }
     if [[ "$port" != "$old" ]] && net_port_in_use "$port" tcp; then
-        alt="$(net_port_pick "$OC_SNELL_DEFAULT_PORT" tcp || true)"
-        oc_err "端口 $port/tcp 已被占用；可改用空闲端口，例如 --port ${alt:-8443}"
+        alt="$(net_port_pick "${def:-20000}" tcp || true)"
+        oc_err "端口 $port/tcp 已被占用；可改用空闲端口，例如 --port ${alt:-20000}"
         return 1
     fi
     printf '%s' "$port"
@@ -171,7 +168,7 @@ ocp_snell_host() {
 proto_snell_meta() {
     printf 'title=%s\n' "$(ocp_snell_name)"
     printf 'desc=Snell v6 单端口 TCP，抗主动探测强；v6 用 mode 取代 obfs\n'
-    printf 'port=%s\n' "$(ocp_snell_default_port)"
+    printf 'port=%s\n' "$(db_get snell port "")"
     printf 'udp=no\n'
     printf 'cert=no\n'
 }

@@ -68,12 +68,13 @@ oc_banner() {
 
 menu_install() {
     local -a items=() keys=()
-    local k label installed port
+    local k label port
     for k in "${OC_PROTOS[@]}"; do
         port="$(oc_meta_field "$k" port)"
-        if db_is_installed "$k"; then installed=" [已安装]"; else installed=""; fi
-        label="$(oc_title_of "$k")  $(oc_meta_field "$k" port)"
-        items+=("$label$installed")
+        label="$(oc_title_of "$k")"
+        [[ -n "$port" ]] && label+="  $port"
+        db_is_installed "$k" && label+="  [已安装]"
+        items+=("$label")
         keys+=("$k")
     done
     local sel

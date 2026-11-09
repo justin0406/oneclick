@@ -9,7 +9,7 @@
 
 umask 077
 
-OC_VERSION="0.2.1"
+OC_VERSION="0.2.2"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -26,6 +26,9 @@ OC_OS_VER=""
 OC_ARCH=""
 OC_YES="${OC_YES:-0}"
 OC_GH_PROXY="${OC_GH_PROXY:-}"
+# 默认端口不再写死：新装协议从该区间随机挑空闲高位端口
+OC_PORT_MIN="${OC_PORT_MIN:-20000}"
+OC_PORT_MAX="${OC_PORT_MAX:-60000}"
 # 自动更新：每次运行读取该地址的 OC_VERSION，比本地新则自动替换自身
 OC_UPDATE_URL="${OC_UPDATE_URL:-https://raw.githubusercontent.com/justin0406/oneclick/main/dist/oneclick.sh}"
 OC_NO_UPDATE="${OC_NO_UPDATE:-0}"
@@ -777,6 +780,21 @@ net_port_in_use() {
         return
     fi
     _net_proc_port_in_use "$port" "$proto"
+}
+
+# net_port_random：在 OC_PORT_MIN..OC_PORT_MAX 内随机挑一个 tcp/udp 都空闲的端口
+net_port_random() {
+    local min="${OC_PORT_MIN:-20000}" max="${OC_PORT_MAX:-60000}"
+    local i p span
+    span=$((max - min + 1))
+    for ((i = 0; i < 50; i++)); do
+        p=$(( (RANDOM * 32768 + RANDOM) % span + min ))
+        if ! net_port_in_use "$p" tcp && ! net_port_in_use "$p" udp; then
+            printf '%s' "$p"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # net_port_pick <start_hint> <tcp|udp>：从 hint 起找空闲端口（先向上，再回头扫 1024+）
@@ -1818,12 +1836,12 @@ ocp_vless_reality_keys() {
     printf '%s\n%s\n' "$priv" "$pub"
 }
 
-# 端口协商：OC_ARG_PORT > 交互（默认 443）；占用时提示换端口，443 建议独占。
+# 端口协商：OC_ARG_PORT > 交互（默认随机高位端口）；占用时提示换端口。
 ocp_vless_reality_port() {
     local port="${OC_ARG_PORT:-}" alt def
-    # 契约顺序：OC_ARG_PORT -> meta 的 port -> 交互；meta 未装时给 443
+    # 契约顺序：OC_ARG_PORT -> meta 的 port -> 交互；meta 未装时随机取高位端口
     def="$(proto_vless_reality_meta | sed -n 's/^port=//p')"
-    [[ -z "$def" ]] && def="443"
+    [[ -z "$def" ]] && def="$(net_port_random)"
     if [[ -z "$port" ]]; then
         port="$(ocp_vless_reality_ask "REALITY 监听端口" "$def")"
     fi
@@ -1832,11 +1850,11 @@ ocp_vless_reality_port() {
     ((port >= 1 && port <= 65535)) || oc_die "端口超出范围：$port"
     if net_port_in_use "$port" tcp; then
         if [[ -n "$OC_ARG_PORT" ]]; then
-            alt="$(net_port_pick 443 tcp)"
-            oc_die "端口 $port 已被占用（--port 指定）；可换空闲端口，例如 --port ${alt:-8443}"
+            alt="$(net_port_pick "$port" tcp)"
+            oc_die "端口 $port 已被占用（--port 指定）；可换空闲端口，例如 --port ${alt:-$def}"
         fi
-        oc_warn "端口 $port 已被占用；443 被占时 VLESS-Reality 建议换端口独占 443"
-        alt="$(net_port_pick 443 tcp)"
+        oc_warn "端口 $port 已被占用；VLESS-Reality 需要一个独占端口"
+        alt="$(net_port_pick "$port" tcp)"
         [[ -z "$alt" || "$alt" == "$port" ]] && oc_die "找不到可用端口，已取消安装"
         if ! oc_confirm "改用空闲端口 $alt ？" y; then
             oc_die "已取消安装"
@@ -1937,9 +1955,8 @@ ocp_vless_reality_ip() {
 proto_vless_reality_meta() {
     local port
     port="$(db_get vless_reality port "")"
-    [[ -z "$port" ]] && port="443"
     printf 'title=%s\n' "${OC_PROTO_TITLE[vless_reality]:-VLESS-Reality}"
-    printf 'desc=%s\n' "Xray-core REALITY 抗封锁强，无需证书，建议独占 443"
+    printf 'desc=%s\n' "Xray-core REALITY 抗封锁强，无需证书，建议独占端口"
     printf 'port=%s\n' "$port"
     printf 'udp=no\n'
     printf 'cert=no\n'
@@ -1967,7 +1984,7 @@ proto_vless_reality_install() {
     oc_title "安装 VLESS-Reality"
     os_dep_install base || oc_die "系统依赖安装失败"
 
-    # 端口先判（443 通常独占），避免下载完才发现被占用
+    # 端口先判，避免下载完才发现被占用
     port="$(ocp_vless_reality_port)" || return 1
 
     bin="$OC_BIN_DIR/xray"
@@ -2078,7 +2095,7 @@ proto_vless_reality_install() {
     oc_info "分享链接（可导入 v2rayN / NekoBox / Shadowrocket）："
     # 拿不到公网 IP 不该让整个安装报失败，装好后 oneclick --link 还能再取
     proto_vless_reality_link || oc_warn "暂时取不到公网 IP，稍后用 oneclick --link vless_reality 查看链接"
-    oc_warn "REALITY 依赖真实 443 直连，套 CDN 或前置反代会失效"
+    oc_warn "REALITY 需要客户端直连该端口，套 CDN 或前置反代会失效"
 }
 
 proto_vless_reality_uninstall() {
@@ -2095,7 +2112,7 @@ proto_vless_reality_uninstall() {
 
     unit="$(oc_unit_name "$key")"
     dir="$(oc_proto_dir "$key")"
-    port="$(db_get "$key" port "443")"
+    port="$(db_get "$key" port "")"
 
     svc_remove "$unit"
     oc_ok "已停止并移除服务：$unit"
@@ -2144,7 +2161,7 @@ proto_vless_reality_link() {
         return 1
     fi
     uuid="$(db_get "$key" uuid "")"
-    port="$(db_get "$key" port "443")"
+    port="$(db_get "$key" port "")"
     sni="$(db_get "$key" server_name "www.microsoft.com")"
     sid="$(db_get "$key" short_id "")"
     pub="$(db_get "$key" public_key "")"
@@ -2226,7 +2243,7 @@ proto_vless_reality_clash() {
         return 1
     fi
     ip="$(ocp_vless_reality_ip)"
-    port="$(db_get "$key" port "443")"
+    port="$(db_get "$key" port "")"
     uuid="$(db_get "$key" uuid "")"
     sni="$(db_get "$key" server_name "www.microsoft.com")"
     sid="$(db_get "$key" short_id "")"
@@ -2256,7 +2273,7 @@ proto_vless_reality_surge() {
         return 1
     fi
     ip="$(ocp_vless_reality_ip)"
-    port="$(db_get "$key" port "443")"
+    port="$(db_get "$key" port "")"
     uuid="$(db_get "$key" uuid "")"
     sni="$(db_get "$key" server_name "www.microsoft.com")"
     sid="$(db_get "$key" short_id "")"
@@ -2275,7 +2292,7 @@ proto_vless_reality_singbox() {
         return 1
     fi
     ip="$(ocp_vless_reality_ip)"
-    port="$(db_get "$key" port "443")"
+    port="$(db_get "$key" port "")"
     uuid="$(db_get "$key" uuid "")"
     sni="$(db_get "$key" server_name "www.microsoft.com")"
     sid="$(db_get "$key" short_id "")"
@@ -2315,7 +2332,7 @@ proto_vless_reality_loon() {
         return 1
     fi
     ip="$(ocp_vless_reality_ip)"
-    port="$(db_get "$key" port "443")"
+    port="$(db_get "$key" port "")"
     uuid="$(db_get "$key" uuid "")"
     sni="$(db_get "$key" server_name "www.microsoft.com")"
     sid="$(db_get "$key" short_id "")"
@@ -2347,7 +2364,7 @@ ocp_hy2_cfg() {
 ocp_hy2_default_port() {
     local port
     port="$(db_get hysteria2 port "")"
-    printf '%s' "${port:-8443}"
+    printf '%s' "${port:-$(net_port_random)}"
 }
 
 ocp_hy2_port_ok() {
@@ -2494,7 +2511,7 @@ ocp_hy2_name() {
 proto_hysteria2_meta() {
     printf 'title=%s\n' "$(ocp_hy2_name)"
     printf 'desc=UDP/QUIC 高丢包抗性协议，支持 salamander 混淆与端口跳跃\n'
-    printf 'port=%s\n' "$(ocp_hy2_default_port)"
+    printf 'port=%s\n' "$(db_get hysteria2 port "")"
     printf 'udp=yes\n'
     printf 'cert=yes\n'
 }
@@ -2527,7 +2544,7 @@ proto_hysteria2_install() {
     ocp_hy2_port_ok "$port" || oc_die "端口无效：${port:-空}（需 1-65535）"
     port=$((10#$port))
     if net_port_in_use "$port" udp; then
-        oc_die "UDP 端口 ${port} 已被占用；建议改用空闲端口：$(net_port_pick 8443 udp)"
+        oc_die "UDP 端口 ${port} 已被占用；建议改用空闲端口：$(net_port_pick "$defport" udp)"
     fi
 
     # 3. 依赖与二进制
@@ -2592,8 +2609,11 @@ proto_hysteria2_install() {
     hop=""
     if oc_confirm "是否启用端口跳跃（UDP 端口段，由 hysteria 自身安排转发，停止时自动清理）？" n; then
         local hs he
-        hs="$(oc_ask "端口段起始" 20000)"
-        he="$(oc_ask "端口段结束" 30000)"
+        # 端口段避开主端口：落在 20000-30000 内就改用 40000-50000
+        hs=20000; he=30000
+        if ((port >= hs && port <= he)); then hs=40000; he=50000; fi
+        hs="$(oc_ask "端口段起始" "$hs")"
+        he="$(oc_ask "端口段结束" "$he")"
         hop="$(ocp_hy2_hop_ok "$hs" "$he" || true)"
         if [[ -z "$hop" ]]; then
             oc_warn "端口段无效（需 1-65535 且起始 < 结束），已跳过端口跳跃"
@@ -2903,9 +2923,6 @@ proto_hysteria2_loon() {
 # 固定版本（升级只改这一处；同时用于下载 URL 与 db.version）
 OC_SNELL_VER="${OC_SNELL_VER:-6.0.0}"
 
-# 默认端口：Snell 上游习惯 2345，保持一致，客户端模板不用改
-OC_SNELL_DEFAULT_PORT="${OC_SNELL_DEFAULT_PORT:-2345}"
-
 # ---------- 内部辅助 ----------
 
 # OC_ARCH -> dl.nssurge.com 的架构段。注意上游叫 aarch64，而 OC_ARCH 叫 arm64
@@ -2943,7 +2960,7 @@ ocp_snell_unit() {
 ocp_snell_default_port() {
     local port
     port="$(db_get snell port "")"
-    printf '%s' "${port:-$OC_SNELL_DEFAULT_PORT}"
+    printf '%s' "${port:-$(net_port_random)}"
 }
 
 ocp_snell_port_ok() {
@@ -2969,8 +2986,8 @@ ocp_snell_ask_port() {
         return 1
     }
     if [[ "$port" != "$old" ]] && net_port_in_use "$port" tcp; then
-        alt="$(net_port_pick "$OC_SNELL_DEFAULT_PORT" tcp || true)"
-        oc_err "端口 $port/tcp 已被占用；可改用空闲端口，例如 --port ${alt:-8443}"
+        alt="$(net_port_pick "${def:-20000}" tcp || true)"
+        oc_err "端口 $port/tcp 已被占用；可改用空闲端口，例如 --port ${alt:-20000}"
         return 1
     fi
     printf '%s' "$port"
@@ -3052,7 +3069,7 @@ ocp_snell_host() {
 proto_snell_meta() {
     printf 'title=%s\n' "$(ocp_snell_name)"
     printf 'desc=Snell v6 单端口 TCP，抗主动探测强；v6 用 mode 取代 obfs\n'
-    printf 'port=%s\n' "$(ocp_snell_default_port)"
+    printf 'port=%s\n' "$(db_get snell port "")"
     printf 'udp=no\n'
     printf 'cert=no\n'
 }
@@ -3423,10 +3440,6 @@ OC_SSRUST_VER="${OC_SSRUST_VER:-}"
 OC_SSRUST_FALLBACK_VER="1.25.0"
 OC_SSRUST_STLS_FALLBACK_VER="0.2.25"
 
-# 默认端口：SS-Rust 上游习惯 2525；ShadowTLS 入口用 8443
-OC_SSRUST_DEFAULT_PORT="${OC_SSRUST_DEFAULT_PORT:-2525}"
-OC_SSRUST_STLS_DEFAULT_PORT="${OC_SSRUST_STLS_DEFAULT_PORT:-8443}"
-
 # 默认方法与兼容退路：默认 SS2022（抗重放、无 IV 复用风险）；老客户端不支持时可选 AEAD
 OC_SSRUST_METHOD="${OC_SSRUST_METHOD:-2022-blake3-aes-128-gcm}"
 OC_SSRUST_METHOD_COMPAT="chacha20-ietf-poly1305"
@@ -3472,7 +3485,7 @@ ocp_ssrust_stls_unit() {
 ocp_ssrust_default_port() {
     local port
     port="$(db_get ss_rust port "")"
-    printf '%s' "${port:-$OC_SSRUST_DEFAULT_PORT}"
+    printf '%s' "${port:-$(net_port_random)}"
 }
 
 ocp_ssrust_port_ok() {
@@ -3539,8 +3552,8 @@ ocp_ssrust_ask_port() {
     if [[ "$port" != "$old" ]]; then
         for proto in tcp udp; do
             if net_port_in_use "$port" "$proto"; then
-                alt="$(net_port_pick "$OC_SSRUST_DEFAULT_PORT" "$proto" || true)"
-                oc_err "端口 $port/$proto 已被占用；可改用空闲端口，例如 --port ${alt:-8443}"
+                alt="$(net_port_pick "${def:-20000}" "$proto" || true)"
+                oc_err "端口 $port/$proto 已被占用；可改用空闲端口，例如 --port ${alt:-20000}"
                 return 1
             fi
         done
@@ -3548,11 +3561,17 @@ ocp_ssrust_ask_port() {
     printf '%s' "$port"
 }
 
-# ShadowTLS 入口端口：默认 8443，重装沿用旧值；必须与 SS 端口不同
+# ShadowTLS 入口端口：随机高位，重装沿用旧值；必须与 SS 端口不同
 ocp_ssrust_ask_stls_port() {
     local ss_port="$1" old port alt
+    local def
     old="$(db_get ss_rust stls_port "")"
-    port="$(oc_ask "ShadowTLS 监听端口（TCP）" "${old:-$OC_SSRUST_STLS_DEFAULT_PORT}")"
+    def="$old"
+    if [[ -z "$def" ]]; then
+        def="$(net_port_random)"
+        while [[ "$def" == "$ss_port" ]]; do def="$(net_port_random)"; done
+    fi
+    port="$(oc_ask "ShadowTLS 监听端口（TCP）" "$def")"
     port="${port//[[:space:]]/}"
     ocp_ssrust_port_ok "$port" || {
         oc_err "端口不合法：${port:-空}"
@@ -3563,8 +3582,8 @@ ocp_ssrust_ask_stls_port() {
         return 1
     fi
     if [[ "$port" != "$old" ]] && net_port_in_use "$port" tcp; then
-        alt="$(net_port_pick "$OC_SSRUST_STLS_DEFAULT_PORT" tcp || true)"
-        oc_err "端口 $port/tcp 已被占用；可改用空闲端口，例如 ${alt:-9443}"
+        alt="$(net_port_pick "${def:-20000}" tcp || true)"
+        oc_err "端口 $port/tcp 已被占用；可改用空闲端口，例如 ${alt:-20000}"
         return 1
     fi
     printf '%s' "$port"
@@ -3840,7 +3859,7 @@ ocp_ssrust_fetch_stls() {
 proto_ss_rust_meta() {
     printf 'title=%s\n' "$(ocp_ssrust_name)"
     printf 'desc=Shadowsocks-Rust（SS2022 优先，TCP+UDP；可选 ShadowTLS v3 伪装）\n'
-    printf 'port=%s\n' "$(ocp_ssrust_default_port)"
+    printf 'port=%s\n' "$(db_get ss_rust port "")"
     printf 'udp=yes\n'
     printf 'cert=no\n'
 }
@@ -4393,7 +4412,7 @@ proto_ss_rust_singbox() {
 }
 
 # Loon 片段：SS 行是 `名称=shadowsocks,主机,端口,加密方式,"密码"`；开 ShadowTLS 时
-# 连 shadow-tls 的 8443 入口，UDP 用 udp-port 指回 SS 自己的端口（Sub-Store 的 loon producer 同款写法）。
+# 连 ShadowTLS 入口端口，UDP 用 udp-port 指回 SS 自己的端口（Sub-Store 的 loon producer 同款写法）。
 proto_ss_rust_loon() {
     local port method password host name shadowtls stls_port stls_pw stls_sni line
     if ! db_has ss_rust; then
@@ -4454,7 +4473,7 @@ ocp_anytls_bin() {
 ocp_anytls_default_port() {
     local port
     port="$(db_get anytls port "")"
-    printf '%s' "${port:-8443}"
+    printf '%s' "${port:-$(net_port_random)}"
 }
 
 ocp_anytls_name() {
@@ -4607,7 +4626,7 @@ ocp_anytls_insecure() {
 proto_anytls_meta() {
     printf 'title=%s\n' "$(ocp_anytls_name)"
     printf 'desc=低特征 TLS 代理（sing-box 实现），支持自签/ACME 证书\n'
-    printf 'port=%s\n' "$(ocp_anytls_default_port)"
+    printf 'port=%s\n' "$(db_get anytls port "")"
     printf 'udp=no\n'
     printf 'cert=yes\n'
 }
@@ -4638,7 +4657,7 @@ proto_anytls_install() {
     ocp_anytls_port_ok "$port" || oc_die "端口无效：${port:-空}（需 1-65535）"
     port=$((10#$port))
     if net_port_in_use "$port" tcp; then
-        oc_die "TCP 端口 ${port} 已被占用；建议改用空闲端口：$(net_port_pick 8443 tcp)"
+        oc_die "TCP 端口 ${port} 已被占用；建议改用空闲端口：$(net_port_pick "$port" tcp)"
     fi
 
     # 3. 依赖与二进制（sing-box 复用，版本不一致才重下）
@@ -4976,12 +4995,13 @@ oc_banner() {
 
 menu_install() {
     local -a items=() keys=()
-    local k label installed port
+    local k label port
     for k in "${OC_PROTOS[@]}"; do
         port="$(oc_meta_field "$k" port)"
-        if db_is_installed "$k"; then installed=" [已安装]"; else installed=""; fi
-        label="$(oc_title_of "$k")  $(oc_meta_field "$k" port)"
-        items+=("$label$installed")
+        label="$(oc_title_of "$k")"
+        [[ -n "$port" ]] && label+="  $port"
+        db_is_installed "$k" && label+="  [已安装]"
+        items+=("$label")
         keys+=("$k")
     done
     local sel

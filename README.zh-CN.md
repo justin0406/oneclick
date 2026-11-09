@@ -27,8 +27,8 @@ sudo oc
 也可以完全不进菜单：
 
 ```bash
-sudo oc --install hysteria2 --port 8443 --cert-mode self --yes
-sudo oc --install vless_reality --port 443 --yes
+sudo oc --install hysteria2 --cert-mode self --yes
+sudo oc --install vless_reality --yes
 sudo oc --status
 sudo oc --link snell --format surge
 ```
@@ -37,11 +37,14 @@ sudo oc --link snell --format surge
 
 | 协议 | 服务端 | 端口 | 证书 | 说明 |
 |---|---|---|---|---|
-| VLESS-Reality | xray-core | 443 独占 | 不需要 | REALITY + x25519，抗主动探测最强，建议作为主协议 |
-| Hysteria2 | hysteria | UDP 高位 | 自签 / ACME / 已有 | QUIC，高丢包网络表现好，支持 salamander 混淆与端口跳跃 |
-| Snell v6 | snell-server 6.0.0 | TCP 高位 | 不需要 | 单端口、PSK 认证，Surge 生态原生支持 |
-| SS-Rust | ssserver | TCP + UDP | 仅 ShadowTLS 需要 | 默认 SS2022；ShadowTLS v3（strict）伪装可选、默认关闭，客户端需支持 v3（如 mihomo / Clash Meta） |
-| AnyTLS | sing-box | TCP 高位 | **必须**自签 / ACME / 已有 | 低特征 TLS 代理，Surge、Loon、sing-box 客户端均可使用 |
+| VLESS-Reality | xray-core | 随机高位端口 | 不需要 | REALITY + x25519，抗主动探测最强，建议作为主协议 |
+| Hysteria2 | hysteria | 随机高位 UDP | 自签 / ACME / 已有 | QUIC，高丢包网络表现好，支持 salamander 混淆与端口跳跃 |
+| Snell v6 | snell-server 6.0.0 | 随机高位 TCP | 不需要 | 单端口、PSK 认证，Surge 生态原生支持 |
+| SS-Rust | ssserver | 随机高位 TCP + UDP | 仅 ShadowTLS 需要 | 默认 SS2022；ShadowTLS v3（strict）伪装可选、默认关闭，客户端需支持 v3（如 mihomo / Clash Meta） |
+| AnyTLS | sing-box | 随机高位 TCP | **必须**自签 / ACME / 已有 | 低特征 TLS 代理，Surge、Loon、sing-box 客户端均可使用 |
+
+端口在安装时于 `20000-60000` 内随机选取（TCP 与 UDP 都确认空闲），重装保持原值；
+可用 `--port` 指定；REALITY 仍建议使用独占端口。
 
 > AnyTLS 用 sing-box 而非 anytls-go：后者服务端的 TLS 是进程内生成的 1 小时临时证书（无 SAN），
 > 无法使用脚本签发的证书；sing-box 的 anytls inbound 支持 `certificate_path` / `key_path`。

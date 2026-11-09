@@ -21,10 +21,6 @@ OC_SSRUST_VER="${OC_SSRUST_VER:-}"
 OC_SSRUST_FALLBACK_VER="1.25.0"
 OC_SSRUST_STLS_FALLBACK_VER="0.2.25"
 
-# 默认端口：SS-Rust 上游习惯 2525；ShadowTLS 入口用 8443
-OC_SSRUST_DEFAULT_PORT="${OC_SSRUST_DEFAULT_PORT:-2525}"
-OC_SSRUST_STLS_DEFAULT_PORT="${OC_SSRUST_STLS_DEFAULT_PORT:-8443}"
-
 # 默认方法与兼容退路：默认 SS2022（抗重放、无 IV 复用风险）；老客户端不支持时可选 AEAD
 OC_SSRUST_METHOD="${OC_SSRUST_METHOD:-2022-blake3-aes-128-gcm}"
 OC_SSRUST_METHOD_COMPAT="chacha20-ietf-poly1305"
@@ -70,7 +66,7 @@ ocp_ssrust_stls_unit() {
 ocp_ssrust_default_port() {
     local port
     port="$(db_get ss_rust port "")"
-    printf '%s' "${port:-$OC_SSRUST_DEFAULT_PORT}"
+    printf '%s' "${port:-$(net_port_random)}"
 }
 
 ocp_ssrust_port_ok() {
@@ -137,8 +133,8 @@ ocp_ssrust_ask_port() {
     if [[ "$port" != "$old" ]]; then
         for proto in tcp udp; do
             if net_port_in_use "$port" "$proto"; then
-                alt="$(net_port_pick "$OC_SSRUST_DEFAULT_PORT" "$proto" || true)"
-                oc_err "端口 $port/$proto 已被占用；可改用空闲端口，例如 --port ${alt:-8443}"
+                alt="$(net_port_pick "${def:-20000}" "$proto" || true)"
+                oc_err "端口 $port/$proto 已被占用；可改用空闲端口，例如 --port ${alt:-20000}"
                 return 1
             fi
         done
@@ -146,11 +142,17 @@ ocp_ssrust_ask_port() {
     printf '%s' "$port"
 }
 
-# ShadowTLS 入口端口：默认 8443，重装沿用旧值；必须与 SS 端口不同
+# ShadowTLS 入口端口：随机高位，重装沿用旧值；必须与 SS 端口不同
 ocp_ssrust_ask_stls_port() {
     local ss_port="$1" old port alt
+    local def
     old="$(db_get ss_rust stls_port "")"
-    port="$(oc_ask "ShadowTLS 监听端口（TCP）" "${old:-$OC_SSRUST_STLS_DEFAULT_PORT}")"
+    def="$old"
+    if [[ -z "$def" ]]; then
+        def="$(net_port_random)"
+        while [[ "$def" == "$ss_port" ]]; do def="$(net_port_random)"; done
+    fi
+    port="$(oc_ask "ShadowTLS 监听端口（TCP）" "$def")"
     port="${port//[[:space:]]/}"
     ocp_ssrust_port_ok "$port" || {
         oc_err "端口不合法：${port:-空}"
@@ -161,8 +163,8 @@ ocp_ssrust_ask_stls_port() {
         return 1
     fi
     if [[ "$port" != "$old" ]] && net_port_in_use "$port" tcp; then
-        alt="$(net_port_pick "$OC_SSRUST_STLS_DEFAULT_PORT" tcp || true)"
-        oc_err "端口 $port/tcp 已被占用；可改用空闲端口，例如 ${alt:-9443}"
+        alt="$(net_port_pick "${def:-20000}" tcp || true)"
+        oc_err "端口 $port/tcp 已被占用；可改用空闲端口，例如 ${alt:-20000}"
         return 1
     fi
     printf '%s' "$port"
@@ -438,7 +440,7 @@ ocp_ssrust_fetch_stls() {
 proto_ss_rust_meta() {
     printf 'title=%s\n' "$(ocp_ssrust_name)"
     printf 'desc=Shadowsocks-Rust（SS2022 优先，TCP+UDP；可选 ShadowTLS v3 伪装）\n'
-    printf 'port=%s\n' "$(ocp_ssrust_default_port)"
+    printf 'port=%s\n' "$(db_get ss_rust port "")"
     printf 'udp=yes\n'
     printf 'cert=no\n'
 }
@@ -991,7 +993,7 @@ proto_ss_rust_singbox() {
 }
 
 # Loon 片段：SS 行是 `名称=shadowsocks,主机,端口,加密方式,"密码"`；开 ShadowTLS 时
-# 连 shadow-tls 的 8443 入口，UDP 用 udp-port 指回 SS 自己的端口（Sub-Store 的 loon producer 同款写法）。
+# 连 ShadowTLS 入口端口，UDP 用 udp-port 指回 SS 自己的端口（Sub-Store 的 loon producer 同款写法）。
 proto_ss_rust_loon() {
     local port method password host name shadowtls stls_port stls_pw stls_sni line
     if ! db_has ss_rust; then

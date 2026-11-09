@@ -99,6 +99,21 @@ net_port_in_use() {
     _net_proc_port_in_use "$port" "$proto"
 }
 
+# net_port_random：在 OC_PORT_MIN..OC_PORT_MAX 内随机挑一个 tcp/udp 都空闲的端口
+net_port_random() {
+    local min="${OC_PORT_MIN:-20000}" max="${OC_PORT_MAX:-60000}"
+    local i p span
+    span=$((max - min + 1))
+    for ((i = 0; i < 50; i++)); do
+        p=$(( (RANDOM * 32768 + RANDOM) % span + min ))
+        if ! net_port_in_use "$p" tcp && ! net_port_in_use "$p" udp; then
+            printf '%s' "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # net_port_pick <start_hint> <tcp|udp>：从 hint 起找空闲端口（先向上，再回头扫 1024+）
 net_port_pick() {
     local start proto p
