@@ -150,7 +150,29 @@ systemctl is-enabled oneclick-vless-reality oneclick-hysteria2 oneclick-snell on
 
 # 10.6 订阅产物必须是 600，且四种格式齐全
 stat -c '%a %n' /etc/oneclick/sub/* && oneclick --sub
+
+# 10.7 端口跳跃：装 hy2 时启用 20000-20100，规则必须带 oneclick-hop 注释且能计数
+iptables -t nat -L PREROUTING -v -n | grep oneclick-hop
+# 从另一台机器发一个 UDP 包，上面的 pkts 计数应 +1
+printf x | nc -u -w1 <服务器IP> 20050
+
+# 10.8 ShadowTLS 真实连通（需要客户端支持 v3 strict，例如 mihomo）
+# 服务端只需确认配置里 fallback 与 dispatch 指向同一个伪装域名
+jq -c '.server.tls_addr' /etc/oneclick/ss_rust/shadowtls.json
 ```
+
+ShadowTLS 使用要点（实测踩坑，2026-11-09）：
+
+- 服务端必须 `strict: true`（脚本默认），客户端也必须走 v3 strict；否则客户端发不出正确的
+  SessionID，服务端会把它当普通 SNI 代理转发，表现为 TLS 握手挂住。
+- 生成的客户端链接里 `plugin=shadow-tls;host=...;password=...` 是 mihomo / Clash Meta 的写法。
+  用 `sslocal --plugin` 做本地测试时必须改成 `passwd=`，而且 SIP003 的 plugin-opts 无法打开
+  strict（日志会显示 `enabled(lossy)`），所以本地验证建议分成两层：
+  `shadow-tls --v3 --strict client ... --listen 127.0.0.1:1090` + `sslocal -s 127.0.0.1:1090`。
+- 服务端 `fallback` 必须和客户端 `SNI` 指向同一站点。已认证客户端的握手实际发往 fallback；
+  如果 fallback 是另一个域名（上游脚本默认 cloudflare.com 配 cloud.tencent.com），对端会因
+  SNI 不匹配直接断开，日志出现 `ServerRandom extract failed, will copy bidirectional`。
+  本脚本从 6b049f1 起把 fallback 写成 `<SNI>:443`，与 dispatch 保持一致。
 
 已知行为（非 bug）：
 

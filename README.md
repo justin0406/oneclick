@@ -42,7 +42,7 @@ sudo oc --link snell --format surge
 | VLESS-Reality | xray-core | 443, exclusive | not needed | REALITY + x25519, strongest against active probing; good default |
 | Hysteria2 | hysteria | high UDP | self-signed / ACME / existing | QUIC, good on lossy links; salamander obfuscation and port hopping optional |
 | Snell v6 | snell-server 6.0.0 | high TCP | not needed | single port, PSK auth, native Surge support |
-| SS-Rust | ssserver | TCP + UDP | only for ShadowTLS | SS2022 by default; ShadowTLS v3 available as an opt-in disguise, off by default |
+| SS-Rust | ssserver | TCP + UDP | only for ShadowTLS | SS2022 by default; ShadowTLS v3 (strict) available as an opt-in disguise, off by default. Client must support v3 (e.g. mihomo / Clash Meta) |
 | AnyTLS | sing-box | high TCP | **required**: self-signed / ACME / existing | low-fingerprint TLS proxy; works with Surge, Loon and sing-box clients |
 
 > **Why AnyTLS runs on sing-box instead of anytls-go:** the anytls-go server generates its TLS

@@ -3963,10 +3963,10 @@ OC_SSRUST_STLS_DEFAULT_PORT="${OC_SSRUST_STLS_DEFAULT_PORT:-8443}"
 # 默认方法与兼容退路：默认 SS2022（抗重放、无 IV 复用风险）；老客户端不支持时可选 AEAD
 OC_SSRUST_METHOD="${OC_SSRUST_METHOD:-2022-blake3-aes-128-gcm}"
 OC_SSRUST_METHOD_COMPAT="chacha20-ietf-poly1305"
-# ShadowTLS 伪装 SNI：需可直连的真实 HTTPS 站点
+# ShadowTLS 伪装 SNI：需可直连、支持 TLS1.3 的真实 HTTPS 站点。
+# 服务端 fallback 必须与客户端 SNI 指向同一站点（见写配置处），否则已认证客户端
+# 会被转发到 SNI 不匹配的站点并立刻断开（已在 Debian 13 VPS 上复现）。
 OC_SSRUST_STLS_SNI="${OC_SSRUST_STLS_SNI:-cloudflare.com}"
-# ShadowTLS 的 fallback：未通过验证的握手会被转发到这里，看起来就是正常访问
-OC_SSRUST_STLS_FALLBACK="cloud.tencent.com:443"
 
 # ---------- 内部辅助 ----------
 
@@ -4245,7 +4245,6 @@ ocp_ssrust_write_stls_config() {
         --argjson stls_port "$stls_port" \
         --arg ss_addr "127.0.0.1:${ss_port}" \
         --arg sni "${sni}:443" \
-        --arg fallback "$OC_SSRUST_STLS_FALLBACK" \
         --arg password "$password" \
         '{
             v3: true,
@@ -4258,7 +4257,7 @@ ocp_ssrust_write_stls_config() {
                 tls_addr: {
                     wildcard_sni: "authed",
                     dispatch: { ($sni): $sni },
-                    fallback: $fallback
+                    fallback: $sni
                 },
                 password: $password
             }
