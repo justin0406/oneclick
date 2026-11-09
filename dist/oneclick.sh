@@ -4781,21 +4781,21 @@ oc_status_line() {
 # ---------- 首屏 ----------
 
 oc_banner() {
-    local ip
+    local ip k line="" n=0 st
     ip="$(db_setting ip)"
-    printf '\n%b%s%b  %bv%s%b\n' "$C_BOLD$C_C" "OneClick 一键代理" "$C_N" "$C_DIM" "$OC_VERSION" "$C_N"
-    oc_kv "系统" "$OC_OS_ID $OC_OS_VER / $OC_ARCH"
-    oc_kv "公网 IP" "${ip:-未检测}"
-    local k line="" n=0
+    printf '\n%bOneClick%b %bv%s%b  %b%s %s · %s%b\n' \
+        "$C_BOLD$C_C" "$C_N" "$C_DIM" "$OC_VERSION" "$C_N" \
+        "$C_DIM" "$OC_OS_ID" "$OC_OS_VER/$OC_ARCH" "${ip:-未检测}" "$C_N"
     for k in "${OC_PROTOS[@]}"; do
         db_is_installed "$k" || continue
         n=$((n + 1))
-        line+="$(oc_title_of "$k"):$(db_get "$k" port "-")($(oc_status_line "$k" | grep -oE '运行中|已停止|failed|未知' || echo '?'))  "
+        st="$(oc_status_line "$k" | grep -oE '运行中|已停止|failed|未知' || echo '?')"
+        line+="$(oc_title_of "$k"):$(db_get "$k" port "-") $st  "
     done
     if ((n > 0)); then
-        oc_kv "已装协议" "$line"
+        printf '%b已装%b  %s\n' "$C_DIM" "$C_N" "$line"
     else
-        oc_kv "已装协议" "无"
+        printf '%b已装%b  %s\n' "$C_DIM" "$C_N" "无"
     fi
     oc_hr
 }
@@ -4804,15 +4804,11 @@ oc_banner() {
 
 menu_install() {
     local -a items=() keys=()
-    local k label installed port cert
+    local k label installed port
     for k in "${OC_PROTOS[@]}"; do
         port="$(oc_meta_field "$k" port)"
-        cert="$(oc_meta_field "$k" cert)"
         if db_is_installed "$k"; then installed=" [已安装]"; else installed=""; fi
-        label="$(oc_title_of "$k")  — $(oc_meta_field "$k" desc)"
-        if [[ "$cert" == "yes" ]]; then
-            label+="  （需证书）"
-        fi
+        label="$(oc_title_of "$k")  $(oc_meta_field "$k" port)"
         items+=("$label$installed")
         keys+=("$k")
     done
@@ -4842,7 +4838,7 @@ menu_manage() {
         oc_warn "还没有安装任何协议，先去菜单 1 安装"
         oc_pause
     fi
-    items+=("维护：脚本自更新 / 内核版本")
+    items+=("维护")
     local sel
     sel="$(oc_menu "节点管理" "${items[@]}")" || return 0
     [[ "$sel" == "0" ]] && return 0
@@ -4859,8 +4855,8 @@ menu_manage() {
         c="$(oc_menu "$(oc_title_of "$k") 管理" \
             "状态与日志" \
             "启动" "停止" "重启" \
-            "改端口" "换凭据" "重生成配置" \
-            "查看链接" "二维码" "删除")" || return 0
+            "改端口" "换凭据" "重生成" \
+            "链接" "二维码" "删除")" || return 0
         case "$c" in
             0) return 0 ;;
             1) oc_title "$(oc_title_of "$k") 状态"
@@ -4932,10 +4928,10 @@ menu_cert() {
     while true; do
         local c
         c="$(oc_menu "证书管理" \
-            "查看证书状态" \
-            "ACME 申请（HTTP-01，需域名解析到本机）" \
+            "证书状态" \
+            "ACME 申请（需域名）" \
             "生成自签证书" \
-            "生成 REALITY x25519 密钥对")" || return 0
+            "生成 REALITY 密钥对")" || return 0
         case "$c" in
             0) return 0 ;;
             1) cert_status; oc_pause ;;
@@ -4970,13 +4966,13 @@ menu_sub() {
     while true; do
         local c
         c="$(oc_menu "订阅与分享" \
-            "生成全部格式（uri/clash/surge/loon）" \
-            "仅生成 URI 列表" \
-            "仅生成 Clash" \
-            "仅生成 Surge" \
-            "仅生成 Loon" \
-            "仅生成 sing-box" \
-            "查看订阅目录")" || return 0
+            "生成全部" \
+            "URI 列表" \
+            "Clash" \
+            "Surge" \
+            "Loon" \
+            "sing-box" \
+            "订阅目录")" || return 0
         case "$c" in
             0) return 0 ;;
             1) for _f in uri clash surge loon; do share_render_sub "$_f" >/dev/null || true; done
@@ -4999,11 +4995,11 @@ menu_backup() {
     while true; do
         local c
         c="$(oc_menu "备份与恢复" \
-            "全量备份（/etc/oneclick → tar.gz）" \
-            "从备份恢复" \
+            "备份" \
+            "恢复" \
             "卸载单个协议" \
             "卸载全部协议" \
-            "彻底卸载（协议+内核+配置+残留）")" || return 0
+            "彻底卸载")" || return 0
         case "$c" in
             0) return 0 ;;
             1) _bk_backup; oc_pause ;;
@@ -5083,8 +5079,8 @@ _menu_maintenance() {
     while true; do
         local c
         c="$(oc_menu "维护" \
-            "脚本自更新（需 OC_UPDATE_URL）" \
-            "查看已装内核版本")" || return 0
+            "脚本自更新" \
+            "内核版本")" || return 0
         case "$c" in
             0) return 0 ;;
             1) _up_self; oc_pause ;;
