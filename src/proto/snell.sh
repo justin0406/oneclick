@@ -536,3 +536,9 @@ proto_snell_singbox() {
             mode: "default"
         }'
 }
+
+# Loon 没有 Snell 支持：保留空实现，避免按格式批量调用时出现“找不到函数”。
+# 生成 Loon 订阅时会在 share_render_loon 里直接跳过 snell。
+proto_snell_loon() {
+    return 1
+}

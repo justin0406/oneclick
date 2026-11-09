@@ -1,4 +1,4 @@
-# lib/share.sh —— 分享链接与订阅产物（Clash / Surge / sing-box / URI / 二维码）
+# lib/share.sh —— 分享链接与订阅产物（Clash / Surge / Loon / sing-box / URI / 二维码）
 #
 # 约定：
 #   - 所有内容生成逻辑只往 stdout 打内容，提示一律走 oc_info/oc_warn（stderr），
@@ -12,6 +12,13 @@
 _share_fn() {
     local p="proto"
     printf '%s_%s_%s' "$p" "$1" "$2"
+}
+
+# oc_loon_name <key> —— Loon 节点名：Loon 的节点名不宜带空格（策略组列表是逗号分隔的裸名），
+# 把标题里的空格换成连字符，片段行与策略组引用都用这个函数，保证两边一致。
+oc_loon_name() {
+    local n="${OC_PROTO_TITLE[$1]:-$1}"
+    printf '%s' "${n// /-}"
 }
 
 # _share_write <kind> <outfile|stdout|""> <content>
@@ -131,6 +138,47 @@ share_render_surge() {
     _share_write "Surge" "$out" "$body"
 }
 
+# share_render_loon [outfile|stdout] —— 完整可导入的 Loon 配置
+# Loon 没有 Snell 支持（官方手册与 Sub-Store 的 Loon 分支都不含 snell），这里跳过该节点。
+share_render_loon() {
+    local out="${1:-stdout}" key fn frag name joined body
+    local -a frags=() names=()
+    for key in "${OC_PROTOS[@]}"; do
+        db_is_installed "$key" || continue
+        [[ "$key" == "snell" ]] && continue
+        fn="$(_share_fn "$key" loon)"
+        if ! frag="$("$fn")"; then
+            oc_warn "跳过 $key：Loon 节点生成失败（缺公网 IP 或状态库字段不全）"
+            continue
+        fi
+        frags+=("$frag")
+        names+=("$(oc_loon_name "$key")")
+    done
+    if [[ ${#frags[@]} -eq 0 ]]; then
+        oc_err "没有可用的已安装协议，无法生成 Loon 订阅"
+        return 1
+    fi
+    joined="$(printf '%s,' "${names[@]}")"
+    joined="${joined%,}"
+    body="$(
+        printf '[General]\n'
+        printf 'internet-test-url = http://wifi.vivo.com.cn/generate_204\n'
+        printf 'proxy-test-url = http://cp.cloudflare.com/generate_204\n'
+        printf 'test-timeout = 5\n'
+        printf '\n'
+        printf '[Proxy]\n'
+        for frag in "${frags[@]}"; do printf '%s\n' "$frag"; done
+        printf '\n'
+        printf '[Proxy Group]\n'
+        printf 'PROXY = select,%s\n' "$joined"
+        printf '\n'
+        printf '[Rule]\n'
+        printf 'GEOIP,CN,DIRECT\n'
+        printf 'FINAL,PROXY\n'
+    )"
+    _share_write "Loon" "$out" "$body"
+}
+
 # share_render_singbox [outfile|stdout] —— 完整 sing-box 配置（首个出站是 selector）
 share_render_singbox() {
     local out="${1:-stdout}" key fn frag tag tags_json merged body
@@ -204,10 +252,11 @@ share_render_sub() {
     case "$format" in
         clash)   ext="yaml" ;;
         surge)   ext="conf" ;;
+        loon)    ext="conf" ;;
         singbox) ext="json" ;;
         uri)     ext="txt" ;;
         *)
-            oc_err "未知订阅格式：${format:-<空>}（可选 clash|surge|singbox|uri）"
+            oc_err "未知订阅格式：${format:-<空>}（可选 clash|surge|loon|singbox|uri）"
             return 1
             ;;
     esac
@@ -222,6 +271,7 @@ share_render_sub() {
     case "$format" in
         clash)   share_render_clash "$path" >/dev/null || return 1 ;;
         surge)   share_render_surge "$path" >/dev/null || return 1 ;;
+        loon)    share_render_loon "$path" >/dev/null || return 1 ;;
         singbox) share_render_singbox "$path" >/dev/null || return 1 ;;
         uri)     share_render_uri_list "$path" >/dev/null || return 1 ;;
     esac
@@ -288,6 +338,17 @@ share_print_links() {
         printf '%s\n' "$out"
     fi
     printf '\n'
+
+    if [[ "$key" != "snell" ]]; then
+        fn="$(_share_fn "$key" loon)"
+        oc_info "Loon 节点行："
+        if ! out="$("$fn")"; then
+            oc_warn "Loon 节点生成失败"
+        else
+            printf '%s\n' "$out"
+        fi
+        printf '\n'
+    fi
 
     fn="$(_share_fn "$key" singbox)"
     oc_info "sing-box outbound："

@@ -2096,7 +2096,7 @@ svc_bin_referenced() {
 
 
 # ===== src/lib/share.sh =====
-# lib/share.sh —— 分享链接与订阅产物（Clash / Surge / sing-box / URI / 二维码）
+# lib/share.sh —— 分享链接与订阅产物（Clash / Surge / Loon / sing-box / URI / 二维码）
 #
 # 约定：
 #   - 所有内容生成逻辑只往 stdout 打内容，提示一律走 oc_info/oc_warn（stderr），
@@ -2110,6 +2110,13 @@ svc_bin_referenced() {
 _share_fn() {
     local p="proto"
     printf '%s_%s_%s' "$p" "$1" "$2"
+}
+
+# oc_loon_name <key> —— Loon 节点名：Loon 的节点名不宜带空格（策略组列表是逗号分隔的裸名），
+# 把标题里的空格换成连字符，片段行与策略组引用都用这个函数，保证两边一致。
+oc_loon_name() {
+    local n="${OC_PROTO_TITLE[$1]:-$1}"
+    printf '%s' "${n// /-}"
 }
 
 # _share_write <kind> <outfile|stdout|""> <content>
@@ -2229,6 +2236,47 @@ share_render_surge() {
     _share_write "Surge" "$out" "$body"
 }
 
+# share_render_loon [outfile|stdout] —— 完整可导入的 Loon 配置
+# Loon 没有 Snell 支持（官方手册与 Sub-Store 的 Loon 分支都不含 snell），这里跳过该节点。
+share_render_loon() {
+    local out="${1:-stdout}" key fn frag name joined body
+    local -a frags=() names=()
+    for key in "${OC_PROTOS[@]}"; do
+        db_is_installed "$key" || continue
+        [[ "$key" == "snell" ]] && continue
+        fn="$(_share_fn "$key" loon)"
+        if ! frag="$("$fn")"; then
+            oc_warn "跳过 $key：Loon 节点生成失败（缺公网 IP 或状态库字段不全）"
+            continue
+        fi
+        frags+=("$frag")
+        names+=("$(oc_loon_name "$key")")
+    done
+    if [[ ${#frags[@]} -eq 0 ]]; then
+        oc_err "没有可用的已安装协议，无法生成 Loon 订阅"
+        return 1
+    fi
+    joined="$(printf '%s,' "${names[@]}")"
+    joined="${joined%,}"
+    body="$(
+        printf '[General]\n'
+        printf 'internet-test-url = http://wifi.vivo.com.cn/generate_204\n'
+        printf 'proxy-test-url = http://cp.cloudflare.com/generate_204\n'
+        printf 'test-timeout = 5\n'
+        printf '\n'
+        printf '[Proxy]\n'
+        for frag in "${frags[@]}"; do printf '%s\n' "$frag"; done
+        printf '\n'
+        printf '[Proxy Group]\n'
+        printf 'PROXY = select,%s\n' "$joined"
+        printf '\n'
+        printf '[Rule]\n'
+        printf 'GEOIP,CN,DIRECT\n'
+        printf 'FINAL,PROXY\n'
+    )"
+    _share_write "Loon" "$out" "$body"
+}
+
 # share_render_singbox [outfile|stdout] —— 完整 sing-box 配置（首个出站是 selector）
 share_render_singbox() {
     local out="${1:-stdout}" key fn frag tag tags_json merged body
@@ -2302,10 +2350,11 @@ share_render_sub() {
     case "$format" in
         clash)   ext="yaml" ;;
         surge)   ext="conf" ;;
+        loon)    ext="conf" ;;
         singbox) ext="json" ;;
         uri)     ext="txt" ;;
         *)
-            oc_err "未知订阅格式：${format:-<空>}（可选 clash|surge|singbox|uri）"
+            oc_err "未知订阅格式：${format:-<空>}（可选 clash|surge|loon|singbox|uri）"
             return 1
             ;;
     esac
@@ -2320,6 +2369,7 @@ share_render_sub() {
     case "$format" in
         clash)   share_render_clash "$path" >/dev/null || return 1 ;;
         surge)   share_render_surge "$path" >/dev/null || return 1 ;;
+        loon)    share_render_loon "$path" >/dev/null || return 1 ;;
         singbox) share_render_singbox "$path" >/dev/null || return 1 ;;
         uri)     share_render_uri_list "$path" >/dev/null || return 1 ;;
     esac
@@ -2386,6 +2436,17 @@ share_print_links() {
         printf '%s\n' "$out"
     fi
     printf '\n'
+
+    if [[ "$key" != "snell" ]]; then
+        fn="$(_share_fn "$key" loon)"
+        oc_info "Loon 节点行："
+        if ! out="$("$fn")"; then
+            oc_warn "Loon 节点生成失败"
+        else
+            printf '%s\n' "$out"
+        fi
+        printf '\n'
+    fi
 
     fn="$(_share_fn "$key" singbox)"
     oc_info "sing-box outbound："
@@ -2944,6 +3005,26 @@ proto_vless_reality_singbox() {
         }'
 }
 
+# Loon 片段：Loon 用 sni + public-key + short-id 表达 REALITY，
+# tls-profile=chrome 对应客户端的 client-fingerprint（见 Sub-Store 的 loon producer）。
+proto_vless_reality_loon() {
+    local key="vless_reality" ip port uuid sni sid pub name
+    if ! db_has "$key"; then
+        oc_err "VLESS-Reality 未安装"
+        return 1
+    fi
+    ip="$(ocp_vless_reality_ip)"
+    port="$(db_get "$key" port "443")"
+    uuid="$(db_get "$key" uuid "")"
+    sni="$(db_get "$key" server_name "www.microsoft.com")"
+    sid="$(db_get "$key" short_id "")"
+    pub="$(db_get "$key" public_key "")"
+    [[ -n "$ip" && -n "$uuid" && -n "$sid" && -n "$pub" ]] || return 1
+    name="$(oc_loon_name "$key")"
+    printf '%s=vless,%s,%s,"%s",transport=tcp,over-tls=true,skip-cert-verify=true,tls-profile=chrome,flow=xtls-rprx-vision,sni=%s,public-key="%s",short-id=%s,udp=true\n' \
+        "$name" "$ip" "$port" "$uuid" "$sni" "$pub" "$sid"
+}
+
 # ===== src/proto/hysteria2.sh =====
 # ============================================================
 # proto/hysteria2.sh —— Hysteria2（apernet/hysteria v2 官方二进制）
@@ -3499,6 +3580,26 @@ proto_hysteria2_singbox() {
     '
 }
 
+# Loon 片段：Hysteria2 在 Loon 里类型名是大写 Hysteria2，SNI 参数叫 tls-name，
+# 端口跳跃用 server-ports（Loon 的 hop 参数，见 Sub-Store 的 loon producer）。
+proto_hysteria2_loon() {
+    local pw port sni hop obfs obfs_pw line
+    pw="$(db_get hysteria2 password "")"
+    port="$(db_get hysteria2 port "")"
+    [[ -n "$pw" && -n "$port" ]] || return 1
+    sni="$(db_get hysteria2 sni bing.com)"
+    hop="$(db_get hysteria2 hop "")"
+    obfs="$(db_get hysteria2 obfs off)"
+    obfs_pw="$(db_get hysteria2 obfs_password "")"
+    line="$(oc_loon_name hysteria2)=Hysteria2,$(ocp_hy2_ip),${port},\"${pw}\""
+    [[ -n "$hop" ]] && line+=",server-ports=\"${hop}\""
+    line+=",tls-name=${sni}"
+    [[ "$(ocp_hy2_insecure)" == "1" ]] && line+=",skip-cert-verify=true"
+    [[ "$obfs" == "salamander" && -n "$obfs_pw" ]] && line+=",salamander-password=${obfs_pw}"
+    line+=",udp=true"
+    printf '%s\n' "$line"
+}
+
 # ===== src/proto/snell.sh =====
 # ============================================================
 # proto/snell.sh —— Snell v6（NSSurge 官方 snell-server）
@@ -4037,6 +4138,12 @@ proto_snell_singbox() {
             psk: $psk,
             mode: "default"
         }'
+}
+
+# Loon 没有 Snell 支持：保留空实现，避免按格式批量调用时出现“找不到函数”。
+# 生成 Loon 订阅时会在 share_render_loon 里直接跳过 snell。
+proto_snell_loon() {
+    return 1
 }
 
 # ===== src/proto/ss_rust.sh =====
@@ -5088,6 +5195,38 @@ proto_ss_rust_singbox() {
         }'
 }
 
+# Loon 片段：SS 行是 `名称=shadowsocks,主机,端口,加密方式,"密码"`；开 ShadowTLS 时
+# 连 shadow-tls 的 8443 入口，UDP 用 udp-port 指回 SS 自己的端口（Sub-Store 的 loon producer 同款写法）。
+proto_ss_rust_loon() {
+    local port method password host name shadowtls stls_port stls_pw stls_sni line
+    if ! db_has ss_rust; then
+        oc_err "SS-Rust 未安装"
+        return 1
+    fi
+    port="$(db_get ss_rust port "")"
+    method="$(db_get ss_rust method "$OC_SSRUST_METHOD")"
+    password="$(db_get ss_rust password "")"
+    host="$(ocp_ssrust_host)" || {
+        oc_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
+        return 1
+    }
+    [[ -n "$port" && -n "$password" ]] || return 1
+    name="$(oc_loon_name ss_rust)"
+    shadowtls="$(db_get ss_rust shadowtls "no")"
+    if [[ "$shadowtls" == "yes" ]]; then
+        stls_port="$(db_get ss_rust stls_port "")"
+        stls_pw="$(db_get ss_rust stls_password "")"
+        stls_sni="$(db_get ss_rust stls_sni "")"
+        if [[ -n "$stls_port" && -n "$stls_pw" && -n "$stls_sni" ]]; then
+            printf '%s=shadowsocks,%s,%s,%s,"%s",shadow-tls-password=%s,shadow-tls-sni=%s,shadow-tls-version=3,udp-port=%s,udp=true\n' \
+                "$name" "$host" "$stls_port" "$method" "$password" "$stls_pw" "$stls_sni" "$port"
+            return 0
+        fi
+    fi
+    printf '%s=shadowsocks,%s,%s,%s,"%s",udp=true\n' \
+        "$name" "$host" "$port" "$method" "$password"
+}
+
 # ===== src/proto/anytls.sh =====
 # ============================================================
 # proto/anytls.sh —— AnyTLS（服务端用 sing-box 的 anytls inbound 承载自签/ACME 证书）
@@ -5563,6 +5702,20 @@ proto_anytls_singbox() {
     '
 }
 
+# Loon 片段：AnyTLS 在 Loon 里类型名是小写 anytls，SNI 参数叫 tls-name。
+proto_anytls_loon() {
+    local pw port sni line
+    pw="$(db_get anytls password "")"
+    port="$(db_get anytls port "")"
+    [[ -n "$pw" && -n "$port" ]] || return 1
+    sni="$(db_get anytls sni bing.com)"
+    line="$(oc_loon_name anytls)=anytls,$(ocp_anytls_ip),${port},\"${pw}\""
+    line+=",tls-name=${sni}"
+    [[ "$(ocp_anytls_insecure)" == "1" ]] && line+=",skip-cert-verify=true"
+    line+=",udp=true"
+    printf '%s\n' "$line"
+}
+
 # ===== src/99-menu.sh =====
 # 99-menu.sh —— 菜单装配 + CLI 入口 + main
 
@@ -5789,23 +5942,25 @@ menu_sub() {
     while true; do
         local c
         c="$(oc_menu "订阅与分享" \
-            "生成全部格式（uri/clash/surge/singbox）" \
+            "生成全部格式（uri/clash/surge/loon/singbox）" \
             "仅生成 URI 列表" \
             "仅生成 Clash" \
             "仅生成 Surge" \
+            "仅生成 Loon" \
             "仅生成 sing-box" \
             "查看订阅目录")" || return 0
         case "$c" in
             0) return 0 ;;
-            1) share_render_uri >/dev/null; share_render_clash >/dev/null; share_render_surge >/dev/null; share_render_singbox >/dev/null
+            1) for _f in uri clash surge loon singbox; do share_render_sub "$_f" >/dev/null || true; done
                oc_ok "已生成到 $OC_SUB_DIR"; ls -l "$OC_SUB_DIR" 2>/dev/null; oc_pause ;;
             2) share_render_uri >/dev/null && oc_ok "URI 列表已生成" ;;
             3) share_render_clash >/dev/null && oc_ok "Clash 配置已生成" ;;
             4) share_render_surge >/dev/null && oc_ok "Surge 配置已生成" ;;
-            5) share_render_singbox >/dev/null && oc_ok "sing-box 配置已生成" ;;
-            6) ls -l "$OC_SUB_DIR" 2>/dev/null || oc_warn "目录为空" ;;
+            5) share_render_loon >/dev/null && oc_ok "Loon 配置已生成" ;;
+            6) share_render_singbox >/dev/null && oc_ok "sing-box 配置已生成" ;;
+            7) ls -l "$OC_SUB_DIR" 2>/dev/null || oc_warn "目录为空" ;;
         esac
-        [[ "$c" != "1" && "$c" != "6" ]] && oc_pause
+        [[ "$c" != "1" && "$c" != "7" ]] && oc_pause
     done
 }
 
@@ -6068,9 +6223,10 @@ cli_link() {
         uri|"") oc_call "$k" link ;;
         clash)  oc_call "$k" clash ;;
         surge)  oc_call "$k" surge ;;
+        loon)   oc_call "$k" loon ;;
         singbox|sing-box) oc_call "$k" singbox ;;
         qr) oc_call "$k" link | head -1 | while read -r l; do share_qr "$l"; done ;;
-        *) oc_die "未知格式：$OC_ARG_FORMAT（uri|clash|surge|singbox|qr）" ;;
+        *) oc_die "未知格式：$OC_ARG_FORMAT（uri|clash|surge|loon|singbox|qr）" ;;
     esac
 }
 
@@ -6085,7 +6241,7 @@ cli_run() {
         status)    cli_status ;;
         list)      cli_list ;;
         cert-status) cert_status ;;
-        sub)       local f; for f in uri clash surge singbox; do share_render_sub "$f" || exit 1; done ;;
+        sub)       local f; for f in uri clash surge loon singbox; do share_render_sub "$f" || exit 1; done ;;
         check-ip)  local ip; ip="$(net_primary_ip)"; [[ -n "$ip" ]] && { db_setting ip "$ip"; printf '%s\n' "$ip"; } || oc_die "检测失败" ;;
         help|"")   oc_usage ;;
         version)   printf 'oneclick %s\n' "$OC_VERSION" ;;
@@ -6102,7 +6258,7 @@ OneClick 一键多协议代理安装器
   oneclick --install <key> [--port N] [--domain D] [--sni S] [--cert-mode M] [--yes]
   oneclick --uninstall <key> [--yes]
   oneclick --regen <key>
-  oneclick --link <key> [--format uri|clash|surge|singbox|qr]
+  oneclick --link <key> [--format uri|clash|surge|loon|singbox|qr]
   oneclick --status [--format json]
   oneclick --list
   oneclick --sub                              生成四种订阅产物

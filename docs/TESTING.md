@@ -167,13 +167,20 @@ reboot
 iptables -S | grep -c oneclick             # 条数应与重启前一致
 iptables -t nat -S | grep oneclick-hop     # 端口跳跃规则也在
 
-# 10.10 客户端导入兼容性
+# 10.10 Loon
+cat /etc/oneclick/sub/oneclick-loon.conf
+# 期望：4 个节点（VLESS-Reality / Hysteria2 / SS-Rust / AnyTLS），不含 Snell；
+# SS-Rust 行带 shadow-tls-* 与 udp-port=<SS 端口>；Hysteria2 行带 server-ports="<端口段>"
+# Loon 里导入：配置 -> 添加配置 -> 从文件/URL 导入；节点名不能有空格的版本才稳妥
+oneclick --link anytls --format loon   # 单个节点行，便于手工粘贴
+
+# 10.11 客户端导入兼容性
 cat /etc/oneclick/sub/oneclick-surge.conf   # 不应出现 vless 行（Surge 不支持 VLESS）
 # Hysteria2 行应带 port-hopping=<端口段>；SS-Rust 行走 ShadowTLS + udp-port=<SS 端口>
 # AnyTLS 需 Surge iOS 5.17.0+ / Mac 6.4.3+；Snell v6 需 Surge（mihomo 只到 v5）
 curl -sS -o /tmp/x "https://manual.nssurge.com/policies/snell.html" && echo "Surge snell version 1-6"
 
-# 10.11 ACME 真实域名（DNS A 已指向本机、80 端口空闲且安全组已放行）
+# 10.12 ACME 真实域名（DNS A 已指向本机、80 端口空闲且安全组已放行）
 oneclick --install anytls --port 9443 --domain <你的域名> --cert-mode acme --yes
 openssl s_client -connect 127.0.0.1:9443 -servername <你的域名> -verify_return_error </dev/null \
   | grep -E 'issuer=|Verify return code'   # 期望 Let's Encrypt + code 0

@@ -1045,3 +1045,35 @@ proto_ss_rust_singbox() {
             password: $password
         }'
 }
+
+# Loon 片段：SS 行是 `名称=shadowsocks,主机,端口,加密方式,"密码"`；开 ShadowTLS 时
+# 连 shadow-tls 的 8443 入口，UDP 用 udp-port 指回 SS 自己的端口（Sub-Store 的 loon producer 同款写法）。
+proto_ss_rust_loon() {
+    local port method password host name shadowtls stls_port stls_pw stls_sni line
+    if ! db_has ss_rust; then
+        oc_err "SS-Rust 未安装"
+        return 1
+    fi
+    port="$(db_get ss_rust port "")"
+    method="$(db_get ss_rust method "$OC_SSRUST_METHOD")"
+    password="$(db_get ss_rust password "")"
+    host="$(ocp_ssrust_host)" || {
+        oc_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
+        return 1
+    }
+    [[ -n "$port" && -n "$password" ]] || return 1
+    name="$(oc_loon_name ss_rust)"
+    shadowtls="$(db_get ss_rust shadowtls "no")"
+    if [[ "$shadowtls" == "yes" ]]; then
+        stls_port="$(db_get ss_rust stls_port "")"
+        stls_pw="$(db_get ss_rust stls_password "")"
+        stls_sni="$(db_get ss_rust stls_sni "")"
+        if [[ -n "$stls_port" && -n "$stls_pw" && -n "$stls_sni" ]]; then
+            printf '%s=shadowsocks,%s,%s,%s,"%s",shadow-tls-password=%s,shadow-tls-sni=%s,shadow-tls-version=3,udp-port=%s,udp=true\n' \
+                "$name" "$host" "$stls_port" "$method" "$password" "$stls_pw" "$stls_sni" "$port"
+            return 0
+        fi
+    fi
+    printf '%s=shadowsocks,%s,%s,%s,"%s",udp=true\n' \
+        "$name" "$host" "$port" "$method" "$password"
+}

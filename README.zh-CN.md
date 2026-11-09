@@ -84,6 +84,7 @@ sudo oc --link snell --format surge
 
 - `sub/oneclick-clash.yaml` — Clash / mihomo（注意：mihomo 仅支持 Snell v1–v5，v6 请用 Surge 或 sing-box）
 - `sub/oneclick-surge.conf` — Surge（不含 VLESS-Reality：Surge 没有 VLESS 策略类型，该节点请用 Clash 或 sing-box 产物）
+- `sub/oneclick-loon.conf` — Loon（不含 Snell：Loon 不支持 Snell；REALITY、Hysteria2 端口跳跃、ShadowTLS 都按 Loon 原生语法输出）
 - `sub/oneclick-singbox.json` — sing-box
 - `sub/oneclick-uri.txt` — 通用 URI 列表，可生成二维码
 

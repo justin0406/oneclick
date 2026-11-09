@@ -224,23 +224,25 @@ menu_sub() {
     while true; do
         local c
         c="$(oc_menu "订阅与分享" \
-            "生成全部格式（uri/clash/surge/singbox）" \
+            "生成全部格式（uri/clash/surge/loon/singbox）" \
             "仅生成 URI 列表" \
             "仅生成 Clash" \
             "仅生成 Surge" \
+            "仅生成 Loon" \
             "仅生成 sing-box" \
             "查看订阅目录")" || return 0
         case "$c" in
             0) return 0 ;;
-            1) share_render_uri >/dev/null; share_render_clash >/dev/null; share_render_surge >/dev/null; share_render_singbox >/dev/null
+            1) for _f in uri clash surge loon singbox; do share_render_sub "$_f" >/dev/null || true; done
                oc_ok "已生成到 $OC_SUB_DIR"; ls -l "$OC_SUB_DIR" 2>/dev/null; oc_pause ;;
             2) share_render_uri >/dev/null && oc_ok "URI 列表已生成" ;;
             3) share_render_clash >/dev/null && oc_ok "Clash 配置已生成" ;;
             4) share_render_surge >/dev/null && oc_ok "Surge 配置已生成" ;;
-            5) share_render_singbox >/dev/null && oc_ok "sing-box 配置已生成" ;;
-            6) ls -l "$OC_SUB_DIR" 2>/dev/null || oc_warn "目录为空" ;;
+            5) share_render_loon >/dev/null && oc_ok "Loon 配置已生成" ;;
+            6) share_render_singbox >/dev/null && oc_ok "sing-box 配置已生成" ;;
+            7) ls -l "$OC_SUB_DIR" 2>/dev/null || oc_warn "目录为空" ;;
         esac
-        [[ "$c" != "1" && "$c" != "6" ]] && oc_pause
+        [[ "$c" != "1" && "$c" != "7" ]] && oc_pause
     done
 }
 
@@ -503,9 +505,10 @@ cli_link() {
         uri|"") oc_call "$k" link ;;
         clash)  oc_call "$k" clash ;;
         surge)  oc_call "$k" surge ;;
+        loon)   oc_call "$k" loon ;;
         singbox|sing-box) oc_call "$k" singbox ;;
         qr) oc_call "$k" link | head -1 | while read -r l; do share_qr "$l"; done ;;
-        *) oc_die "未知格式：$OC_ARG_FORMAT（uri|clash|surge|singbox|qr）" ;;
+        *) oc_die "未知格式：$OC_ARG_FORMAT（uri|clash|surge|loon|singbox|qr）" ;;
     esac
 }
 
@@ -520,7 +523,7 @@ cli_run() {
         status)    cli_status ;;
         list)      cli_list ;;
         cert-status) cert_status ;;
-        sub)       local f; for f in uri clash surge singbox; do share_render_sub "$f" || exit 1; done ;;
+        sub)       local f; for f in uri clash surge loon singbox; do share_render_sub "$f" || exit 1; done ;;
         check-ip)  local ip; ip="$(net_primary_ip)"; [[ -n "$ip" ]] && { db_setting ip "$ip"; printf '%s\n' "$ip"; } || oc_die "检测失败" ;;
         help|"")   oc_usage ;;
         version)   printf 'oneclick %s\n' "$OC_VERSION" ;;
@@ -537,7 +540,7 @@ OneClick 一键多协议代理安装器
   oneclick --install <key> [--port N] [--domain D] [--sni S] [--cert-mode M] [--yes]
   oneclick --uninstall <key> [--yes]
   oneclick --regen <key>
-  oneclick --link <key> [--format uri|clash|surge|singbox|qr]
+  oneclick --link <key> [--format uri|clash|surge|loon|singbox|qr]
   oneclick --status [--format json]
   oneclick --list
   oneclick --sub                              生成四种订阅产物

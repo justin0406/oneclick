@@ -540,3 +540,23 @@ proto_vless_reality_singbox() {
             }
         }'
 }
+
+# Loon 片段：Loon 用 sni + public-key + short-id 表达 REALITY，
+# tls-profile=chrome 对应客户端的 client-fingerprint（见 Sub-Store 的 loon producer）。
+proto_vless_reality_loon() {
+    local key="vless_reality" ip port uuid sni sid pub name
+    if ! db_has "$key"; then
+        oc_err "VLESS-Reality 未安装"
+        return 1
+    fi
+    ip="$(ocp_vless_reality_ip)"
+    port="$(db_get "$key" port "443")"
+    uuid="$(db_get "$key" uuid "")"
+    sni="$(db_get "$key" server_name "www.microsoft.com")"
+    sid="$(db_get "$key" short_id "")"
+    pub="$(db_get "$key" public_key "")"
+    [[ -n "$ip" && -n "$uuid" && -n "$sid" && -n "$pub" ]] || return 1
+    name="$(oc_loon_name "$key")"
+    printf '%s=vless,%s,%s,"%s",transport=tcp,over-tls=true,skip-cert-verify=true,tls-profile=chrome,flow=xtls-rprx-vision,sni=%s,public-key="%s",short-id=%s,udp=true\n' \
+        "$name" "$ip" "$port" "$uuid" "$sni" "$pub" "$sid"
+}

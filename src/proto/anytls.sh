@@ -471,3 +471,17 @@ proto_anytls_singbox() {
         }
     '
 }
+
+# Loon 片段：AnyTLS 在 Loon 里类型名是小写 anytls，SNI 参数叫 tls-name。
+proto_anytls_loon() {
+    local pw port sni line
+    pw="$(db_get anytls password "")"
+    port="$(db_get anytls port "")"
+    [[ -n "$pw" && -n "$port" ]] || return 1
+    sni="$(db_get anytls sni bing.com)"
+    line="$(oc_loon_name anytls)=anytls,$(ocp_anytls_ip),${port},\"${pw}\""
+    line+=",tls-name=${sni}"
+    [[ "$(ocp_anytls_insecure)" == "1" ]] && line+=",skip-cert-verify=true"
+    line+=",udp=true"
+    printf '%s\n' "$line"
+}

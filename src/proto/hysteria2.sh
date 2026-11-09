@@ -551,3 +551,23 @@ proto_hysteria2_singbox() {
                  + (if $insecure == 1 then {insecure: true} else {} end))}
     '
 }
+
+# Loon 片段：Hysteria2 在 Loon 里类型名是大写 Hysteria2，SNI 参数叫 tls-name，
+# 端口跳跃用 server-ports（Loon 的 hop 参数，见 Sub-Store 的 loon producer）。
+proto_hysteria2_loon() {
+    local pw port sni hop obfs obfs_pw line
+    pw="$(db_get hysteria2 password "")"
+    port="$(db_get hysteria2 port "")"
+    [[ -n "$pw" && -n "$port" ]] || return 1
+    sni="$(db_get hysteria2 sni bing.com)"
+    hop="$(db_get hysteria2 hop "")"
+    obfs="$(db_get hysteria2 obfs off)"
+    obfs_pw="$(db_get hysteria2 obfs_password "")"
+    line="$(oc_loon_name hysteria2)=Hysteria2,$(ocp_hy2_ip),${port},\"${pw}\""
+    [[ -n "$hop" ]] && line+=",server-ports=\"${hop}\""
+    line+=",tls-name=${sni}"
+    [[ "$(ocp_hy2_insecure)" == "1" ]] && line+=",skip-cert-verify=true"
+    [[ "$obfs" == "salamander" && -n "$obfs_pw" ]] && line+=",salamander-password=${obfs_pw}"
+    line+=",udp=true"
+    printf '%s\n' "$line"
+}
