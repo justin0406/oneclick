@@ -244,7 +244,7 @@ share_qr() {
             return 1
         }
     else
-        oc_warn "未安装 qrencode（oneclick 系统工具里可装），下面直接给出原始文本："
+        oc_warn "未安装 qrencode（apt install qrencode 后才出二维码），下面直接给出原始文本："
         printf '%s\n' "$text"
     fi
 }

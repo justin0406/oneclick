@@ -73,8 +73,8 @@ sudo oc --link snell --format surge
 ├── sub/                   # oneclick-clash.yaml / -surge.conf / -singbox.json / -uri.txt
 └── <协议 key>/            # 各协议配置（600）
 
-/usr/local/bin/oneclick    # 入口（oc 为简写）
-/usr/local/bin/{xray,hysteria,snell-server,ssserver,sing-box}
+/usr/local/bin/oneclick    # 只放入口（oc 为简写），彻底卸载时删除
+/opt/oneclick/bin/{xray,hysteria,snell-server,ssserver,shadow-tls,sing-box}   # 私有内核目录
 /etc/systemd/system/oneclick-<协议>.service
 ```
 

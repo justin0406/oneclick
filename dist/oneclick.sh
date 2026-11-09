@@ -14,9 +14,11 @@ OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
 OC_SUB_DIR="$OC_ROOT/sub"
-OC_LOG_DIR="${OC_LOG_DIR:-/var/log/oneclick}"
-OC_BIN_DIR="${OC_BIN_DIR:-/usr/local/bin}"
-OC_ENTRY="$OC_BIN_DIR/oneclick"
+# 内核放私有目录，不碰 /usr/local/bin；/usr/local/bin 只放一个入口（卸载时删除）
+OC_BIN_ROOT="${OC_BIN_ROOT:-/opt/oneclick}"
+OC_BIN_DIR="${OC_BIN_DIR:-$OC_BIN_ROOT/bin}"
+OC_ENTRY_DIR="${OC_ENTRY_DIR:-/usr/local/bin}"
+OC_ENTRY="$OC_ENTRY_DIR/oneclick"
 OC_UNIT_DIR="${OC_UNIT_DIR:-/etc/systemd/system}"
 OC_FW_FILE="$OC_ROOT/firewall.sh"
 OC_FW_UNIT="oneclick-firewall"
@@ -308,7 +310,7 @@ db_init() {
     OC_CERT_DIR="$OC_ROOT/certs"
     OC_SUB_DIR="$OC_ROOT/sub"
     mkdir -p "$OC_ROOT" "$OC_CERT_DIR" "$OC_SUB_DIR" 2>/dev/null || true
-    mkdir -p "$OC_LOG_DIR" 2>/dev/null || true
+    mkdir -p "$OC_BIN_DIR" 2>/dev/null || true
     chmod 700 "$OC_ROOT" 2>/dev/null || true
     if [[ ! -f "$OC_DB" ]]; then
         printf '{"installed":[],"settings":{}}\n' > "$OC_DB"
@@ -1146,117 +1148,6 @@ net_fw_status() {
 }
 
 # ===========================================================================
-# BBR / TCP Fast Open：只改两个 sysctl 键，落在 99-oneclick-bbr.conf（TFO 也写这里）
-# ===========================================================================
-
-_net_sysctl_conf() { printf '/etc/sysctl.d/99-oneclick-bbr.conf'; }
-
-# 只替换目标 key 那一行，保留文件里其它 OneClick 调优项（TFO 与 BBR 共用一个文件）
-_net_sysctl_write() {
-    local key="$1" val="$2" conf tmp
-    conf="$(_net_sysctl_conf)"
-    mkdir -p /etc/sysctl.d 2>/dev/null || return 1
-    tmp="$(mktemp '/etc/sysctl.d/.99-oneclick-bbr.XXXXXX')" || return 1
-    if [[ -f "$conf" ]]; then
-        awk -v k="$key" '
-            {
-                line = $0
-                gsub(/[[:space:]]/, "", line)
-                if (index(line, k "=") != 1) print
-            }' "$conf" > "$tmp" || true
-    else
-        printf '# OneClick 网络调优：BBR / TCP Fast Open（由 oneclick 生成，可直接删除）\n' > "$tmp"
-    fi
-    printf '%s = %s\n' "$key" "$val" >> "$tmp"
-    chmod 644 "$tmp" 2>/dev/null || true
-    if ! mv -f "$tmp" "$conf"; then
-        rm -f "$tmp"
-        return 1
-    fi
-    return 0
-}
-
-_net_sysctl_apply() {
-    local key="$1" val="$2"
-    _net_sysctl_write "$key" "$val" || return 1
-    command -v sysctl >/dev/null 2>&1 || return 1
-    sysctl --system >/dev/null 2>&1 \
-        || sysctl -p "$(_net_sysctl_conf)" >/dev/null 2>&1 \
-        || true
-    # 部分容器不读 /etc/sysctl.d：直接下发一次兜底，最终以实际值判定
-    if [[ "$(sysctl -n "$key" 2>/dev/null)" != "$val" ]]; then
-        sysctl -w "${key}=${val}" >/dev/null 2>&1 || true
-    fi
-    return 0
-}
-
-_net_bbr_supported() {
-    local avail
-    avail="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
-    if [[ " $avail " == *' bbr '* ]]; then
-        return 0
-    fi
-    # 模块未加载时先尝试加载再复核
-    if command -v modprobe >/dev/null 2>&1; then
-        modprobe tcp_bbr >/dev/null 2>&1 || true
-    fi
-    avail="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
-    [[ " $avail " == *' bbr '* ]]
-}
-
-# net_bbr_status：打印当前 cc/qdisc，cc=bbr 时返回 0
-net_bbr_status() {
-    local cc qdisc
-    cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
-    qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
-    oc_kv "拥塞控制算法" "${cc:-未知}"
-    oc_kv "默认队列规则" "${qdisc:-未知}"
-    [[ "$cc" == 'bbr' ]]
-}
-
-net_bbr_enable() {
-    if net_bbr_status >/dev/null 2>&1; then
-        oc_ok "BBR 已启用，无需重复配置"
-        return 0
-    fi
-    if ! _net_bbr_supported; then
-        oc_err "当前内核不支持 BBR（需 4.9+ 且未禁用 tcp_bbr）"
-        return 1
-    fi
-    # 先设 qdisc 再切 cc，切换过程不断流
-    _net_sysctl_apply net.core.default_qdisc fq || return 1
-    _net_sysctl_apply net.ipv4.tcp_congestion_control bbr || return 1
-    if net_bbr_status >/dev/null 2>&1; then
-        oc_ok "BBR 已启用（写入 $(_net_sysctl_conf)）"
-        return 0
-    fi
-    oc_err "BBR 未生效：容器/虚拟化可能限制 sysctl，请检查"
-    return 1
-}
-
-# net_tfo_status：tcp_fastopen=3（客户端 + 服务端）返回 0
-net_tfo_status() {
-    local v
-    v="$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null || true)"
-    oc_kv "TCP Fast Open" "${v:-未知}（3 = 客户端+服务端）"
-    [[ "$v" == '3' ]]
-}
-
-net_tfo_enable() {
-    if net_tfo_status >/dev/null 2>&1; then
-        oc_ok "TCP Fast Open 已启用（值=3），无需重复配置"
-        return 0
-    fi
-    _net_sysctl_apply net.ipv4.tcp_fastopen 3 || return 1
-    if net_tfo_status >/dev/null 2>&1; then
-        oc_ok "TCP Fast Open 已启用（写入 $(_net_sysctl_conf)）"
-        return 0
-    fi
-    oc_err "TCP Fast Open 未生效（部分内核/容器限制）"
-    return 1
-}
-
-# ===========================================================================
 # UDP 端口跳跃：PREROUTING DNAT 到本机目标端口，comment oneclick-hop-<key>
 # ===========================================================================
 
@@ -1730,6 +1621,8 @@ cert_acme() {
         fi
         rm -f -- "$plog"
         acme="$(_cert_acme_bin)" || { oc_err "cert_acme: 安装后仍未找到 acme.sh"; return 1; }
+        # 记账：卸载时据此清掉续期任务与 ~/.acme.sh，避免残留
+        db_setting acme_installed 1 >/dev/null 2>&1 || true
     fi
     # 默认 CA 是 ZeroSSL，需要 EAB；脚本化一律用 Let's Encrypt
     "$acme" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
@@ -2342,7 +2235,7 @@ share_qr() {
             return 1
         }
     else
-        oc_warn "未安装 qrencode（oneclick 系统工具里可装），下面直接给出原始文本："
+        oc_warn "未安装 qrencode（apt install qrencode 后才出二维码），下面直接给出原始文本："
         printf '%s\n' "$text"
     fi
 }
@@ -5911,29 +5804,25 @@ menu_system() {
     while true; do
         local c
         c="$(oc_menu "系统工具" \
-            "安装基础依赖" \
+            "补装缺失的基础依赖" \
             "防火墙：放行已装协议端口" \
-            "开启 BBR" \
-            "开启 TCP Fast Open" \
             "查询端口占用" \
             "设置 GitHub 镜像前缀" \
             "重新检测公网 IP" \
             "本机信息")" || return 0
         case "$c" in
             0) return 0 ;;
-            1) os_dep_install base qr acme && oc_ok "依赖就绪"; oc_pause ;;
+            1) os_dep_install base && oc_ok "依赖就绪（只装缺失项）"; oc_pause ;;
             2) _sys_open_ports; oc_pause ;;
-            3) if net_bbr_enable; then oc_ok "BBR 已开启（sysctl 已生效）"; else oc_err "BBR 开启失败（内核可能不支持）"; fi; oc_pause ;;
-            4) if net_tfo_enable; then oc_ok "TFO 已开启"; else oc_err "TFO 开启失败"; fi; oc_pause ;;
-            5) local p
+            3) local p
                p="$(oc_ask "端口号" "")"
                [[ -n "$p" ]] && { net_port_in_use "$p" tcp && oc_warn "TCP $p 已占用" || oc_ok "TCP $p 空闲"
                                    net_port_in_use "$p" udp && oc_warn "UDP $p 已占用" || oc_ok "UDP $p 空闲"; }
                oc_pause ;;
-            6) local m
+            4) local m
                m="$(oc_ask "镜像前缀（如 https://gh-proxy.net，留空则直连）" "$(db_setting gh_proxy)")"
                db_setting gh_proxy "$m" && oc_ok "已保存：${m:-直连}"; oc_pause ;;
-            7) local ip
+            5) local ip
                ip="$(net_primary_ip)"
                if [[ -n "$ip" ]]; then
                    db_setting ip "$ip"
@@ -5942,12 +5831,11 @@ menu_system() {
                    oc_warn "检测失败（可手动 db 设置）"
                fi
                oc_pause ;;
-            8) oc_kv "脚本版本" "$OC_VERSION"
+            6) oc_kv "脚本版本" "$OC_VERSION"
                oc_kv "系统" "$OC_OS_ID $OC_OS_VER"
                oc_kv "架构" "$OC_ARCH"
                oc_kv "防火墙后端" "$(net_fw_backend)"
-               oc_kv "BBR" "$(net_bbr_status)"
-               oc_kv "TFO" "$(net_tfo_status)"
+               oc_kv "内核目录" "$OC_BIN_DIR"
                oc_kv "公网 IP" "$(db_setting ip)"
                oc_pause ;;
         esac
@@ -5982,13 +5870,15 @@ menu_backup() {
             "全量备份（/etc/oneclick → tar.gz）" \
             "从备份恢复" \
             "卸载单个协议" \
-            "卸载全部协议")" || return 0
+            "卸载全部协议" \
+            "彻底卸载（协议+内核+配置+残留）")" || return 0
         case "$c" in
             0) return 0 ;;
             1) _bk_backup; oc_pause ;;
             2) _bk_restore; oc_pause ;;
             3) menu_manage ;;
             4) _bk_uninstall_all; oc_pause ;;
+            5) _bk_purge; oc_pause ;;
         esac
     done
 }
@@ -6023,6 +5913,53 @@ _bk_uninstall_all() {
         OC_YES=1 oc_call "$k" uninstall
     done
     oc_ok "全部协议已卸载"
+}
+
+# 彻底卸载：协议、unit、防火墙快照、私有内核、配置、脚本入口、acme 残留。
+# 只删本脚本自己创建的东西；用户原有的服务与二进制（如 snell-server.service）不碰。
+_bk_purge() {
+    oc_confirm "彻底卸载：删除全部协议、/etc/oneclick、私有内核与脚本入口，确认？" n || return 0
+    local k t ch line bin_root_abs
+    for k in "${OC_PROTOS[@]}"; do
+        if db_has "$k" || db_is_installed "$k"; then
+            OC_YES=1 oc_call "$k" uninstall >/dev/null 2>&1 || true
+        fi
+    done
+    # 防火墙：先删 oneclick-* 规则，再停掉持久化单
+    for t in iptables ip6tables; do
+        command -v "$t" >/dev/null 2>&1 || continue
+        for ch in INPUT FORWARD; do
+            "$t" -S "$ch" 2>/dev/null | grep -F 'oneclick-' | while IFS= read -r line; do
+                read -r -a __a <<< "$line"
+                [[ "${__a[0]:-}" == "-A" ]] || continue
+                "$t" -D "${__a[@]:1}" >/dev/null 2>&1 || true
+            done
+        done
+        "$t" -t nat -S PREROUTING 2>/dev/null | grep -F 'oneclick-hop' | while IFS= read -r line; do
+            read -r -a __a <<< "$line"
+            [[ "${__a[0]:-}" == "-A" ]] || continue
+            "$t" -t nat -D "${__a[@]:1}" >/dev/null 2>&1 || true
+        done
+    done
+    command -v nft >/dev/null 2>&1 && nft delete table inet oneclick >/dev/null 2>&1 || true
+    svc_remove "$OC_FW_UNIT"
+    rm -f -- "$OC_FW_FILE"
+    # 旧版本留下的 BBR/TFO 调优文件（新版本不再写 sysctl）
+    rm -f -- /etc/sysctl.d/99-oneclick-bbr.conf
+    # acme.sh：只有本脚本装过才清续期任务与目录
+    if [[ "$(db_setting acme_installed 0)" == "1" && -d "$HOME/.acme.sh" ]]; then
+        if crontab -l 2>/dev/null | grep -qF "$HOME/.acme.sh/acme.sh"; then
+            crontab -l 2>/dev/null | grep -vF "$HOME/.acme.sh/acme.sh" | crontab - 2>/dev/null || true
+            [[ -z "$(crontab -l 2>/dev/null)" ]] && crontab -r 2>/dev/null || true
+        fi
+        rm -rf -- "$HOME/.acme.sh"
+        oc_info "已清理 acme.sh 与续期任务"
+    fi
+    rm -rf -- "$OC_ROOT" /var/log/oneclick
+    bin_root_abs="$OC_BIN_ROOT"
+    [[ -n "$bin_root_abs" && "$bin_root_abs" != "/" ]] && rm -rf -- "$bin_root_abs"
+    rm -f -- "$OC_ENTRY" "$OC_ENTRY_DIR/oc"
+    oc_ok "已彻底卸载（内核、配置、unit、防火墙快照、脚本入口均已清理）"
 }
 
 # ---------- 7. 更新 ----------
@@ -6185,6 +6122,7 @@ cli_run() {
         sub)       local f; local -a fs=(uri clash surge loon)
                    [[ -n "${OC_ARG_FORMAT:-}" ]] && fs=("$OC_ARG_FORMAT")
                    for f in "${fs[@]}"; do share_render_sub "$f" || exit 1; done ;;
+        purge)     _bk_purge ;;
         check-ip)  local ip; ip="$(net_primary_ip)"; [[ -n "$ip" ]] && { db_setting ip "$ip"; printf '%s\n' "$ip"; } || oc_die "检测失败" ;;
         help|"")   oc_usage ;;
         version)   printf 'oneclick %s\n' "$OC_VERSION" ;;
@@ -6207,6 +6145,7 @@ OneClick 一键多协议代理安装器
   oneclick --sub [--format uri|clash|surge|loon|singbox]
                                                生成节点片段（默认不含 sing-box）
   oneclick --cert-status
+  oneclick --purge                             彻底卸载（协议+内核+配置+残留）
   oneclick --check-ip
   oneclick --version | --help
 
@@ -6221,7 +6160,7 @@ oc_parse_args() {
                 [[ -n "${2:-}" ]] || oc_die "$1 需要协议 key"
                 OC_CLI_ACTION="${1#--}"
                 OC_CLI_KEY="$2"; shift 2 ;;
-            --status|--list|--cert-status|--check-ip|--sub|--version|--help)
+            --status|--list|--cert-status|--check-ip|--sub|--purge|--version|--help)
                 OC_CLI_ACTION="${1#--}"; shift ;;
             --port)   [[ -n "${2:-}" ]] || oc_die "--port 需要端口"; OC_ARG_PORT="$2"; shift 2 ;;
             --domain) [[ -n "${2:-}" ]] || oc_die "--domain 需要域名"; OC_ARG_DOMAIN="$2"; shift 2 ;;

@@ -292,6 +292,8 @@ cert_acme() {
         fi
         rm -f -- "$plog"
         acme="$(_cert_acme_bin)" || { oc_err "cert_acme: 安装后仍未找到 acme.sh"; return 1; }
+        # 记账：卸载时据此清掉续期任务与 ~/.acme.sh，避免残留
+        db_setting acme_installed 1 >/dev/null 2>&1 || true
     fi
     # 默认 CA 是 ZeroSSL，需要 EAB；脚本化一律用 Let's Encrypt
     "$acme" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true

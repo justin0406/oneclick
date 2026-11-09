@@ -84,8 +84,8 @@ those belong in a panel. This script's job is to install and operate one machine
 ├── sub/                   # oneclick-clash.yaml / -surge.conf / -singbox.json / -uri.txt
 └── <protocol key>/        # per-protocol config (0600)
 
-/usr/local/bin/oneclick    # entry point (oc is an alias)
-/usr/local/bin/{xray,hysteria,snell-server,ssserver,sing-box}
+/usr/local/bin/oneclick    # entry point only (oc is an alias); removed on purge
+/opt/oneclick/bin/{xray,hysteria,snell-server,ssserver,shadow-tls,sing-box}   # private kernels
 /etc/systemd/system/oneclick-<protocol>.service
 ```
 

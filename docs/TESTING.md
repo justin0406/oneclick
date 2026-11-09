@@ -75,12 +75,12 @@ ls /etc/systemd/system/oneclick-anytls.service 2>/dev/null || echo UNIT_CLEAN  #
 
 ```bash
 oneclick   # 菜单 5
-# 5.3 BBR：期望 sysctl 显示 bbr、fq
- sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc
-# 5.4 TFO：期望 3
- sysctl net.ipv4.tcp_fastopen
 # 5.2 防火墙放行：期望只多出 oneclick- 开头的规则
  nft list ruleset 2>/dev/null | grep -i oneclick || iptables-save | grep oneclick
+# 脚本不调内核参数：不应存在 OneClick 写的 sysctl 文件（老版本升级上来的话顺手删掉）
+ls /etc/sysctl.d/99-oneclick-bbr.conf 2>/dev/null && echo "旧残留，建议删除" || echo SYSCTL_CLEAN
+# 补装依赖只装缺失项：已装齐时应当 0 次 apt 安装（看输出里没有"安装系统依赖"）
+oneclick   # 菜单 5 → 1
 ```
 
 ## 6. 订阅与分享
@@ -88,8 +88,9 @@ oneclick   # 菜单 5
 ```bash
 oneclick   # 菜单 4 → 1（全部格式）
 ls -l /etc/oneclick/sub/
-cat /etc/oneclick/sub/oneclick-clash.yaml     # 期望：proxies/proxy-groups/rules 完整，能直接导入 Clash
-cat /etc/oneclick/sub/oneclick-surge.conf     # 期望：[Proxy]/[Proxy Group]/[Rule] 完整
+cat /etc/oneclick/sub/oneclick-clash.yaml     # 期望：只有 - name: 节点项，没有 proxies:/rules 骨架
+cat /etc/oneclick/sub/oneclick-surge.conf     # 期望：只有节点行，没有 [General]/[Proxy Group]/[Rule]
+ls /etc/oneclick/sub/oneclick-singbox.json 2>/dev/null && echo "应在显式请求后才生成"
 ```
 
 ## 7. 备份与恢复
@@ -139,11 +140,11 @@ time oneclick --install snell --port 22 --yes
 jq 'del(.vless_reality)' /etc/oneclick/db.json > /tmp/db && mv /tmp/db /etc/oneclick/db.json
 oneclick --install vless_reality --port 443 --yes
 
-# 10.3 与他人共用的二进制不会被误删：本机已有 snell-server.service 时卸载本脚本的 snell
-ls -l /usr/local/bin/snell-server      # 卸载后应仍在，且系统服务照常运行
-systemctl is-active snell-server
+# 10.3 内核只装私有目录，不碰 /usr/local/bin：本机原有 snell-server.service 不受影响
+ls -l /opt/oneclick/bin/snell-server /usr/local/bin/snell-server
+systemctl is-active snell-server      # 期望：仍 active，且指向用户自己的二进制
 
-# 10.4 snell-server 已存在时重装应"复用"下载（不重新下载）
+# 10.4 重装复用私有目录里的二进制（不重新下载）
 oneclick --uninstall snell --yes && oneclick --install snell --port 12345 --yes   # 期望：复用已安装的 snell-server
 
 # 10.5 重装后重启机器，五个 unit 全部自启

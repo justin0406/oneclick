@@ -6,7 +6,7 @@ db_init() {
     OC_CERT_DIR="$OC_ROOT/certs"
     OC_SUB_DIR="$OC_ROOT/sub"
     mkdir -p "$OC_ROOT" "$OC_CERT_DIR" "$OC_SUB_DIR" 2>/dev/null || true
-    mkdir -p "$OC_LOG_DIR" 2>/dev/null || true
+    mkdir -p "$OC_BIN_DIR" 2>/dev/null || true
     chmod 700 "$OC_ROOT" 2>/dev/null || true
     if [[ ! -f "$OC_DB" ]]; then
         printf '{"installed":[],"settings":{}}\n' > "$OC_DB"

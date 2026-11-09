@@ -252,29 +252,25 @@ menu_system() {
     while true; do
         local c
         c="$(oc_menu "系统工具" \
-            "安装基础依赖" \
+            "补装缺失的基础依赖" \
             "防火墙：放行已装协议端口" \
-            "开启 BBR" \
-            "开启 TCP Fast Open" \
             "查询端口占用" \
             "设置 GitHub 镜像前缀" \
             "重新检测公网 IP" \
             "本机信息")" || return 0
         case "$c" in
             0) return 0 ;;
-            1) os_dep_install base qr acme && oc_ok "依赖就绪"; oc_pause ;;
+            1) os_dep_install base && oc_ok "依赖就绪（只装缺失项）"; oc_pause ;;
             2) _sys_open_ports; oc_pause ;;
-            3) if net_bbr_enable; then oc_ok "BBR 已开启（sysctl 已生效）"; else oc_err "BBR 开启失败（内核可能不支持）"; fi; oc_pause ;;
-            4) if net_tfo_enable; then oc_ok "TFO 已开启"; else oc_err "TFO 开启失败"; fi; oc_pause ;;
-            5) local p
+            3) local p
                p="$(oc_ask "端口号" "")"
                [[ -n "$p" ]] && { net_port_in_use "$p" tcp && oc_warn "TCP $p 已占用" || oc_ok "TCP $p 空闲"
                                    net_port_in_use "$p" udp && oc_warn "UDP $p 已占用" || oc_ok "UDP $p 空闲"; }
                oc_pause ;;
-            6) local m
+            4) local m
                m="$(oc_ask "镜像前缀（如 https://gh-proxy.net，留空则直连）" "$(db_setting gh_proxy)")"
                db_setting gh_proxy "$m" && oc_ok "已保存：${m:-直连}"; oc_pause ;;
-            7) local ip
+            5) local ip
                ip="$(net_primary_ip)"
                if [[ -n "$ip" ]]; then
                    db_setting ip "$ip"
@@ -283,12 +279,11 @@ menu_system() {
                    oc_warn "检测失败（可手动 db 设置）"
                fi
                oc_pause ;;
-            8) oc_kv "脚本版本" "$OC_VERSION"
+            6) oc_kv "脚本版本" "$OC_VERSION"
                oc_kv "系统" "$OC_OS_ID $OC_OS_VER"
                oc_kv "架构" "$OC_ARCH"
                oc_kv "防火墙后端" "$(net_fw_backend)"
-               oc_kv "BBR" "$(net_bbr_status)"
-               oc_kv "TFO" "$(net_tfo_status)"
+               oc_kv "内核目录" "$OC_BIN_DIR"
                oc_kv "公网 IP" "$(db_setting ip)"
                oc_pause ;;
         esac
@@ -323,13 +318,15 @@ menu_backup() {
             "全量备份（/etc/oneclick → tar.gz）" \
             "从备份恢复" \
             "卸载单个协议" \
-            "卸载全部协议")" || return 0
+            "卸载全部协议" \
+            "彻底卸载（协议+内核+配置+残留）")" || return 0
         case "$c" in
             0) return 0 ;;
             1) _bk_backup; oc_pause ;;
             2) _bk_restore; oc_pause ;;
             3) menu_manage ;;
             4) _bk_uninstall_all; oc_pause ;;
+            5) _bk_purge; oc_pause ;;
         esac
     done
 }
@@ -364,6 +361,53 @@ _bk_uninstall_all() {
         OC_YES=1 oc_call "$k" uninstall
     done
     oc_ok "全部协议已卸载"
+}
+
+# 彻底卸载：协议、unit、防火墙快照、私有内核、配置、脚本入口、acme 残留。
+# 只删本脚本自己创建的东西；用户原有的服务与二进制（如 snell-server.service）不碰。
+_bk_purge() {
+    oc_confirm "彻底卸载：删除全部协议、/etc/oneclick、私有内核与脚本入口，确认？" n || return 0
+    local k t ch line bin_root_abs
+    for k in "${OC_PROTOS[@]}"; do
+        if db_has "$k" || db_is_installed "$k"; then
+            OC_YES=1 oc_call "$k" uninstall >/dev/null 2>&1 || true
+        fi
+    done
+    # 防火墙：先删 oneclick-* 规则，再停掉持久化单
+    for t in iptables ip6tables; do
+        command -v "$t" >/dev/null 2>&1 || continue
+        for ch in INPUT FORWARD; do
+            "$t" -S "$ch" 2>/dev/null | grep -F 'oneclick-' | while IFS= read -r line; do
+                read -r -a __a <<< "$line"
+                [[ "${__a[0]:-}" == "-A" ]] || continue
+                "$t" -D "${__a[@]:1}" >/dev/null 2>&1 || true
+            done
+        done
+        "$t" -t nat -S PREROUTING 2>/dev/null | grep -F 'oneclick-hop' | while IFS= read -r line; do
+            read -r -a __a <<< "$line"
+            [[ "${__a[0]:-}" == "-A" ]] || continue
+            "$t" -t nat -D "${__a[@]:1}" >/dev/null 2>&1 || true
+        done
+    done
+    command -v nft >/dev/null 2>&1 && nft delete table inet oneclick >/dev/null 2>&1 || true
+    svc_remove "$OC_FW_UNIT"
+    rm -f -- "$OC_FW_FILE"
+    # 旧版本留下的 BBR/TFO 调优文件（新版本不再写 sysctl）
+    rm -f -- /etc/sysctl.d/99-oneclick-bbr.conf
+    # acme.sh：只有本脚本装过才清续期任务与目录
+    if [[ "$(db_setting acme_installed 0)" == "1" && -d "$HOME/.acme.sh" ]]; then
+        if crontab -l 2>/dev/null | grep -qF "$HOME/.acme.sh/acme.sh"; then
+            crontab -l 2>/dev/null | grep -vF "$HOME/.acme.sh/acme.sh" | crontab - 2>/dev/null || true
+            [[ -z "$(crontab -l 2>/dev/null)" ]] && crontab -r 2>/dev/null || true
+        fi
+        rm -rf -- "$HOME/.acme.sh"
+        oc_info "已清理 acme.sh 与续期任务"
+    fi
+    rm -rf -- "$OC_ROOT" /var/log/oneclick
+    bin_root_abs="$OC_BIN_ROOT"
+    [[ -n "$bin_root_abs" && "$bin_root_abs" != "/" ]] && rm -rf -- "$bin_root_abs"
+    rm -f -- "$OC_ENTRY" "$OC_ENTRY_DIR/oc"
+    oc_ok "已彻底卸载（内核、配置、unit、防火墙快照、脚本入口均已清理）"
 }
 
 # ---------- 7. 更新 ----------
@@ -526,6 +570,7 @@ cli_run() {
         sub)       local f; local -a fs=(uri clash surge loon)
                    [[ -n "${OC_ARG_FORMAT:-}" ]] && fs=("$OC_ARG_FORMAT")
                    for f in "${fs[@]}"; do share_render_sub "$f" || exit 1; done ;;
+        purge)     _bk_purge ;;
         check-ip)  local ip; ip="$(net_primary_ip)"; [[ -n "$ip" ]] && { db_setting ip "$ip"; printf '%s\n' "$ip"; } || oc_die "检测失败" ;;
         help|"")   oc_usage ;;
         version)   printf 'oneclick %s\n' "$OC_VERSION" ;;
@@ -548,6 +593,7 @@ OneClick 一键多协议代理安装器
   oneclick --sub [--format uri|clash|surge|loon|singbox]
                                                生成节点片段（默认不含 sing-box）
   oneclick --cert-status
+  oneclick --purge                             彻底卸载（协议+内核+配置+残留）
   oneclick --check-ip
   oneclick --version | --help
 
@@ -562,7 +608,7 @@ oc_parse_args() {
                 [[ -n "${2:-}" ]] || oc_die "$1 需要协议 key"
                 OC_CLI_ACTION="${1#--}"
                 OC_CLI_KEY="$2"; shift 2 ;;
-            --status|--list|--cert-status|--check-ip|--sub|--version|--help)
+            --status|--list|--cert-status|--check-ip|--sub|--purge|--version|--help)
                 OC_CLI_ACTION="${1#--}"; shift ;;
             --port)   [[ -n "${2:-}" ]] || oc_die "--port 需要端口"; OC_ARG_PORT="$2"; shift 2 ;;
             --domain) [[ -n "${2:-}" ]] || oc_die "--domain 需要域名"; OC_ARG_DOMAIN="$2"; shift 2 ;;
