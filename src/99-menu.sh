@@ -35,24 +35,33 @@ oc_status_line() {
 
 # ---------- 首屏 ----------
 
+# 状态行用短名，保证 5 个节点能排在一行
+_oc_short() {
+    case "$1" in
+        vless_reality) printf 'VLESS' ;;
+        hysteria2)     printf 'HY2' ;;
+        snell)         printf 'Snell' ;;
+        ss_rust)       printf 'SS' ;;
+        anytls)        printf 'AnyTLS' ;;
+        *)             printf '%s' "$1" ;;
+    esac
+}
+
 oc_banner() {
-    local ip k line="" n=0 st
+    local ip k st
+    local -a items=()
+    oc_clear
     ip="$(db_setting ip)"
-    printf '\n%bOneClick%b %bv%s%b  %b%s %s · %s%b\n' \
-        "$C_BOLD$C_C" "$C_N" "$C_DIM" "$OC_VERSION" "$C_N" \
-        "$C_DIM" "$OC_OS_ID" "$OC_OS_VER/$OC_ARCH" "${ip:-未检测}" "$C_N"
+    oc_panel "OneClick  v$OC_VERSION" "$OC_OS_ID $OC_OS_VER  $OC_ARCH"
+    oc_sysline "$ip"
     for k in "${OC_PROTOS[@]}"; do
         db_is_installed "$k" || continue
-        n=$((n + 1))
-        st="$(oc_status_line "$k" | grep -oE '运行中|已停止|failed|未知' || echo '?')"
-        line+="$(oc_title_of "$k"):$(db_get "$k" port "-") $st  "
+        st="$(oc_status_line "$k" | grep -oE '运行中|已停止|failed|未知' || echo '未知')"
+        items+=("$st|$(_oc_short "$k"):$(db_get "$k" port '-')")
     done
-    if ((n > 0)); then
-        printf '%b已装%b  %s\n' "$C_DIM" "$C_N" "$line"
-    else
-        printf '%b已装%b  %s\n' "$C_DIM" "$C_N" "无"
-    fi
-    oc_hr
+    printf '\n'
+    oc_dots "${items[@]}"
+    printf '\n'
 }
 
 # ---------- 1. 安装 ----------
