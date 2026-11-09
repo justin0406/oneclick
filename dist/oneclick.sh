@@ -4841,11 +4841,15 @@ menu_manage() {
     if [[ ${#keys[@]} -eq 0 ]]; then
         oc_warn "还没有安装任何协议，先去菜单 1 安装"
         oc_pause
-        return 0
     fi
+    items+=("维护：脚本自更新 / 内核版本")
     local sel
     sel="$(oc_menu "节点管理" "${items[@]}")" || return 0
     [[ "$sel" == "0" ]] && return 0
+    if [[ "$sel" == "${#items[@]}" ]]; then
+        _menu_maintenance
+        return 0
+    fi
     k="${keys[$((sel - 1))]}"
     local unit
     unit="$(oc_unit_name "$k")"
@@ -5074,20 +5078,17 @@ _bk_purge() {
     oc_ok "已彻底卸载（内核、配置、unit、脚本入口均已清理）"
 }
 
-# ---------- 7. 更新 ----------
-
-menu_update() {
+# 节点管理里的维护入口（脚本自更新 / 内核版本）
+_menu_maintenance() {
     while true; do
         local c
-        c="$(oc_menu "更新与版本" \
+        c="$(oc_menu "维护" \
             "脚本自更新（需 OC_UPDATE_URL）" \
-            "查看已装内核版本" \
-            "查看本机已装协议")" || return 0
+            "查看已装内核版本")" || return 0
         case "$c" in
             0) return 0 ;;
             1) _up_self; oc_pause ;;
             2) _up_kernels; oc_pause ;;
-            3) _up_installed; oc_pause ;;
         esac
     done
 }
@@ -5136,14 +5137,6 @@ _up_kernels() {
     done
 }
 
-_up_installed() {
-    local k
-    for k in "${OC_PROTOS[@]}"; do
-        db_is_installed "$k" || continue
-        oc_kv "$(oc_title_of "$k")" "$(db_get "$k" port "-") / $(oc_status_line "$k")"
-    done
-}
-
 # ---------- 主菜单 ----------
 
 main_menu() {
@@ -5156,8 +5149,7 @@ main_menu() {
             "节点管理" \
             "证书管理" \
             "订阅与分享" \
-            "备份与恢复" \
-            "更新与版本")" || return 0
+            "备份与恢复")" || return 0
         case "$c" in
             0) printf '\n%b再见%b\n\n' "$C_DIM" "$C_N"; return 0 ;;
             1) menu_install ;;
@@ -5165,7 +5157,6 @@ main_menu() {
             3) menu_cert ;;
             4) menu_sub ;;
             5) menu_backup ;;
-            6) menu_update ;;
         esac
         unset OC_MENU_ZERO_LABEL
     done
