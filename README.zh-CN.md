@@ -106,7 +106,7 @@ src/proto/{vless_reality,hysteria2,snell,ss_rust,anytls}.sh
 src/99-menu.sh              菜单、CLI、main
 ```
 
-完整测试流程见 [docs/TESTING.md](docs/TESTING.md)。
+每个版本都会先在干净的 Debian 13（trixie）上跑完整验证再推送。
 
 ## 致谢
 

@@ -119,7 +119,7 @@ src/proto/{vless_reality,hysteria2,snell,ss_rust,anytls}.sh
 src/99-menu.sh              menu, CLI, main
 ```
 
-The full Debian 13 test checklist lives in [docs/TESTING.md](docs/TESTING.md).
+Every release is verified end-to-end on a fresh Debian 13 (trixie) VPS before it is pushed.
 
 ## Credits
 
