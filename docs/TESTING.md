@@ -166,6 +166,16 @@ cat /etc/oneclick/firewall.sh              # 只含带 oneclick- comment 的规�
 reboot
 iptables -S | grep -c oneclick             # 条数应与重启前一致
 iptables -t nat -S | grep oneclick-hop     # 端口跳跃规则也在
+
+# 10.10 ACME 真实域名（DNS A 已指向本机、80 端口空闲且安全组已放行）
+oneclick --install anytls --port 9443 --domain <你的域名> --cert-mode acme --yes
+openssl s_client -connect 127.0.0.1:9443 -servername <你的域名> -verify_return_error </dev/null \
+  | grep -E 'issuer=|Verify return code'   # 期望 Let's Encrypt + code 0
+
+# 复装应复用未过期证书，不重复占用 Let's Encrypt 签发限额
+oneclick --uninstall anytls --yes
+oneclick --install anytls --port 9443 --domain <你的域名> --cert-mode acme --yes
+# 期望出现：已有可用证书（域名匹配且剩余 >30 天），直接复用
 ```
 
 ShadowTLS 使用要点（实测踩坑，2026-11-09）：

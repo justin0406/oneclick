@@ -1682,7 +1682,7 @@ cert_self() {
 
 # cert_acme <domain> <outdir>：acme.sh + HTTP-01（--standalone --httpport 80）
 cert_acme() {
-    local domain="$1" outdir="$2" acme crt key email issued=1
+    local domain="$1" outdir="$2" acme crt key email issued=1 plog
     if [[ -z "$domain" || -z "$outdir" ]]; then
         oc_err "cert_acme: 用法 cert_acme <domain> <outdir>"
         return 1
@@ -1710,11 +1710,25 @@ cert_acme() {
             || os_pkg_install socat cronie >/dev/null 2>&1 \
             || oc_warn "socat/cron 安装失败，ACME 可能不可用"
         email="admin@$domain"
-        if ! curl -fsSL --connect-timeout 10 --max-time 120 https://get.acme.sh 2>/dev/null \
-                | sh -s "email=$email" >/dev/null 2>&1; then
-            oc_err "cert_acme: acme.sh 安装失败（get.acme.sh 不可达）"
+        # 安装脚本本身要从 GitHub 拉 master.tar.gz，偶发失败很常见：重试一次并保留日志
+        plog="$(mktemp)" || plog="/tmp/oneclick-acme-install.$$.log"
+        local try rc=1
+        for try in 1 2; do
+            if curl -fsSL --connect-timeout 10 --max-time 120 https://get.acme.sh 2>/dev/null \
+                    | sh -s "email=$email" >"$plog" 2>&1; then
+                rc=0
+                break
+            fi
+            oc_warn "acme.sh 安装失败（第 ${try} 次），10 秒后重试"
+            ((try < 2)) && sleep 10
+        done
+        if ((rc != 0)); then
+            oc_err "cert_acme: acme.sh 安装失败（get.acme.sh 或 GitHub 下载不可达），最后几行日志："
+            tail -5 "$plog" >&2
+            rm -f -- "$plog"
             return 1
         fi
+        rm -f -- "$plog"
         acme="$(_cert_acme_bin)" || { oc_err "cert_acme: 安装后仍未找到 acme.sh"; return 1; }
     fi
     # 默认 CA 是 ZeroSSL，需要 EAB；脚本化一律用 Let's Encrypt
