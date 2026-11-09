@@ -243,49 +243,8 @@ menu_sub() {
     done
 }
 
-# ---------- 5. 系统工具 ----------
+# ---------- 5. 备份 / 恢复 / 卸载 ----------
 
-menu_system() {
-    while true; do
-        local c
-        c="$(oc_menu "系统工具" \
-            "补装缺失的基础依赖" \
-            "查询端口占用" \
-            "设置 GitHub 镜像前缀" \
-            "重新检测公网 IP" \
-            "本机信息")" || return 0
-        case "$c" in
-            0) return 0 ;;
-            1) os_dep_install base && oc_ok "依赖就绪（只装缺失项）"; oc_pause ;;
-            2) local p
-               p="$(oc_ask "端口号" "")"
-               [[ -n "$p" ]] && { net_port_in_use "$p" tcp && oc_warn "TCP $p 已占用" || oc_ok "TCP $p 空闲"
-                                   net_port_in_use "$p" udp && oc_warn "UDP $p 已占用" || oc_ok "UDP $p 空闲"; }
-               oc_pause ;;
-            3) local m
-               m="$(oc_ask "镜像前缀（如 https://gh-proxy.net，留空则直连）" "$(db_setting gh_proxy)")"
-               db_setting gh_proxy "$m" && oc_ok "已保存：${m:-直连}"; oc_pause ;;
-            4) local ip
-               ip="$(net_primary_ip)"
-               if [[ -n "$ip" ]]; then
-                   db_setting ip "$ip"
-                   oc_ok "公网 IP：$ip"
-               else
-                   oc_warn "检测失败（可手动 db 设置）"
-               fi
-               oc_pause ;;
-            5) oc_kv "脚本版本" "$OC_VERSION"
-               oc_kv "系统" "$OC_OS_ID $OC_OS_VER"
-               oc_kv "架构" "$OC_ARCH"
-               oc_kv "内核目录" "$OC_BIN_DIR"
-               oc_kv "公网 IP" "$(db_setting ip)"
-               oc_pause ;;
-        esac
-    done
-}
-
-
-# ---------- 6. 备份 / 恢复 / 卸载 ----------
 
 menu_backup() {
     while true; do
@@ -420,14 +379,15 @@ _up_self() {
 }
 
 _up_kernels() {
-    local -a bins=(xray hysteria snell-server ssserver anytls-server shadow-tls)
-    local b v
+    local -a bins=(xray hysteria snell-server ssserver shadow-tls sing-box)
+    local b v p
     for b in "${bins[@]}"; do
-        if command -v "$b" >/dev/null 2>&1; then
-            v="$("$b" --version 2>/dev/null | head -1 || true)"
-            [[ -z "$v" ]] && v="$("$b" version 2>/dev/null | head -1 || true)"
-            printf '  %-18s %s\n' "$b" "${v:-已安装}"
-        fi
+        p="$OC_BIN_DIR/$b"
+        [[ -x "$p" ]] || p="$(command -v "$b" 2>/dev/null || true)"
+        [[ -n "$p" ]] || continue
+        v="$("$p" --version 2>/dev/null | head -1 || true)"
+        [[ -z "$v" ]] && v="$("$p" version 2>/dev/null | head -1 || true)"
+        printf '  %-18s %s\n' "$b" "${v:-已安装}"
     done
 }
 
@@ -451,7 +411,6 @@ main_menu() {
             "节点管理" \
             "证书管理" \
             "订阅与分享" \
-            "系统工具" \
             "备份与恢复" \
             "更新与版本")" || return 0
         case "$c" in
@@ -460,9 +419,8 @@ main_menu() {
             2) menu_manage ;;
             3) menu_cert ;;
             4) menu_sub ;;
-            5) menu_system ;;
-            6) menu_backup ;;
-            7) menu_update ;;
+            5) menu_backup ;;
+            6) menu_update ;;
         esac
         unset OC_MENU_ZERO_LABEL
     done
@@ -531,7 +489,6 @@ cli_run() {
                    [[ -n "${OC_ARG_FORMAT:-}" ]] && fs=("$OC_ARG_FORMAT")
                    for f in "${fs[@]}"; do share_render_sub "$f" || exit 1; done ;;
         purge)     _bk_purge ;;
-        check-ip)  local ip; ip="$(net_primary_ip)"; [[ -n "$ip" ]] && { db_setting ip "$ip"; printf '%s\n' "$ip"; } || oc_die "检测失败" ;;
         help|"")   oc_usage ;;
         version)   printf 'oneclick %s\n' "$OC_VERSION" ;;
         *)         oc_die "未知动作：$OC_CLI_ACTION" ;;
@@ -554,7 +511,6 @@ OneClick 一键多协议代理安装器
                                                生成节点片段（默认不含 sing-box）
   oneclick --cert-status
   oneclick --purge                             彻底卸载（协议+内核+配置+残留）
-  oneclick --check-ip
   oneclick --version | --help
 
 协议 key：vless_reality  hysteria2  snell  ss_rust  anytls
@@ -568,7 +524,7 @@ oc_parse_args() {
                 [[ -n "${2:-}" ]] || oc_die "$1 需要协议 key"
                 OC_CLI_ACTION="${1#--}"
                 OC_CLI_KEY="$2"; shift 2 ;;
-            --status|--list|--cert-status|--check-ip|--sub|--purge|--version|--help)
+            --status|--list|--cert-status|--sub|--purge|--version|--help)
                 OC_CLI_ACTION="${1#--}"; shift ;;
             --port)   [[ -n "${2:-}" ]] || oc_die "--port 需要端口"; OC_ARG_PORT="$2"; shift 2 ;;
             --domain) [[ -n "${2:-}" ]] || oc_die "--domain 需要域名"; OC_ARG_DOMAIN="$2"; shift 2 ;;
@@ -594,9 +550,8 @@ main() {
     oc_require_root
     os_detect
     export DEBIAN_FRONTEND=noninteractive
-    if ! command -v jq >/dev/null 2>&1; then
-        os_dep_install base || oc_die "基础依赖安装失败，无法继续"
-    fi
+    # 基础依赖按需自动补齐（只装缺失项，已齐时是空操作）
+    os_dep_install base || oc_die "基础依赖安装失败，无法继续"
     db_init
     if [[ -n "$OC_CLI_ACTION" ]]; then
         cli_run
