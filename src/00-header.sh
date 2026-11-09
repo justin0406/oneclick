@@ -18,6 +18,8 @@ OC_LOG_DIR="${OC_LOG_DIR:-/var/log/oneclick}"
 OC_BIN_DIR="${OC_BIN_DIR:-/usr/local/bin}"
 OC_ENTRY="$OC_BIN_DIR/oneclick"
 OC_UNIT_DIR="${OC_UNIT_DIR:-/etc/systemd/system}"
+OC_FW_FILE="$OC_ROOT/firewall.sh"
+OC_FW_UNIT="oneclick-firewall"
 
 OC_OS_ID=""
 OC_OS_VER=""

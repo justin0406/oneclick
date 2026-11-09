@@ -159,6 +159,13 @@ printf x | nc -u -w1 <服务器IP> 20050
 # 10.8 ShadowTLS 真实连通（需要客户端支持 v3 strict，例如 mihomo）
 # 服务端只需确认配置里 fallback 与 dispatch 指向同一个伪装域名
 jq -c '.server.tls_addr' /etc/oneclick/ss_rust/shadowtls.json
+
+# 10.9 重启后防火墙规则自动恢复（没装 iptables-persistent 也不丢）
+systemctl is-enabled oneclick-firewall     # enabled
+cat /etc/oneclick/firewall.sh              # 只含带 oneclick- comment 的规则
+reboot
+iptables -S | grep -c oneclick             # 条数应与重启前一致
+iptables -t nat -S | grep oneclick-hop     # 端口跳跃规则也在
 ```
 
 ShadowTLS 使用要点（实测踩坑，2026-11-09）：
@@ -179,3 +186,6 @@ ShadowTLS 使用要点（实测踩坑，2026-11-09）：
 - `--yes` 重装已安装协议会直接失败并提示先 `--uninstall`，这是为了避免脚本化误覆盖
 - 自签证书（`--cert-mode self`）每次安装都会重签，客户端需要重新导入 `insecure` 链接
 - AnyTLS 卸载保留 sing-box 二进制，VLESS 卸载默认保留 xray（其它面板可能共用）
+- 防火墙规则会写成 `/etc/oneclick/firewall.sh` 并由 `oneclick-firewall.service` 在开机时重放；
+  只重放带 `oneclick-` comment 的规则，不会覆盖 ufw/firewalld/nft 自己的策略
+- 全部协议卸载后，`oneclick-firewall.service` 与 `firewall.sh` 会自动移除
