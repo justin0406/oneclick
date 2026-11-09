@@ -61,6 +61,10 @@ sudo oc --link snell --format surge
 **下载可验证。** 所有二进制走统一下载层：3 次重试、可选镜像前缀（`OC_GH_PROXY`）、有 SHA256 则校验、
 失败自动回滚，不留下半截文件。
 
+**自动更新。** 每次运行都会从本仓库读取 `dist/oneclick.sh`，比较内嵌的 `OC_VERSION`，
+有新版本就原子替换自身。任何失败（断网、镜像不可用、内容异常）都静默跳过，绝不阻塞菜单。
+可用 `OC_NO_UPDATE=1` 关闭，或 `OC_UPDATE_URL` 指向自己的镜像。没有菜单项，也不写 cron。
+
 **卸载即卸载。** 停止服务、取消开机自启、删除 unit 并 `daemon-reload`，配置与证书单独确认是否保留。
 `oneclick --purge` 会清掉脚本创建的一切，且必须手动输入 `PURGE` 才执行。
 

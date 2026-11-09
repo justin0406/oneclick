@@ -9,7 +9,7 @@
 
 umask 077
 
-OC_VERSION="0.1.0"
+OC_VERSION="0.2.0"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -26,6 +26,9 @@ OC_OS_VER=""
 OC_ARCH=""
 OC_YES="${OC_YES:-0}"
 OC_GH_PROXY="${OC_GH_PROXY:-}"
+# 自动更新：每次运行读取该地址的 OC_VERSION，比本地新则自动替换自身
+OC_UPDATE_URL="${OC_UPDATE_URL:-https://raw.githubusercontent.com/justin0406/oneclick/main/dist/oneclick.sh}"
+OC_NO_UPDATE="${OC_NO_UPDATE:-0}"
 
 OC_ARG_PORT=""
 OC_ARG_DOMAIN=""

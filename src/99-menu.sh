@@ -102,12 +102,13 @@ menu_manage() {
         oc_warn "还没有安装任何协议，先去菜单 1 安装"
         oc_pause
     fi
-    items+=("维护")
+    items+=("内核版本")
     local sel
     sel="$(oc_menu "节点管理" "${items[@]}")" || return 0
     [[ "$sel" == "0" ]] && return 0
     if [[ "$sel" == "${#items[@]}" ]]; then
-        _menu_maintenance
+        _up_kernels
+        oc_pause
         return 0
     fi
     k="${keys[$((sel - 1))]}"
@@ -339,20 +340,6 @@ _bk_purge() {
 }
 
 # 节点管理里的维护入口（脚本自更新 / 内核版本）
-_menu_maintenance() {
-    while true; do
-        local c
-        c="$(oc_menu "维护" \
-            "脚本自更新" \
-            "内核版本")" || return 0
-        case "$c" in
-            0) return 0 ;;
-            1) _up_self; oc_pause ;;
-            2) _up_kernels; oc_pause ;;
-        esac
-    done
-}
-
 # 首次从任意路径运行时，把自身装成 oneclick 命令，方便以后直接输入 oneclick
 oc_self_install() {
     local src="${BASH_SOURCE[0]:-}"
@@ -366,22 +353,63 @@ oc_self_install() {
     fi
 }
 
-_up_self() {
-    if [[ -z "${OC_UPDATE_URL:-}" ]]; then
-        oc_warn "未设置 OC_UPDATE_URL，跳过自更新"
-        oc_info "手动：curl -fsSL <你的发布地址> -o $OC_ENTRY && chmod +x $OC_ENTRY"
-        return 0
+# 版本比较：remote 比 local 新时返回 0
+oc_version_gt() {
+    local a="$1" b="$2" i x y
+    local -a av bv
+    IFS=. read -r -a av <<< "$a"
+    IFS=. read -r -a bv <<< "$b"
+    for i in 0 1 2; do
+        x="${av[$i]:-0}"; y="${bv[$i]:-0}"
+        [[ "$x" =~ ^[0-9]+$ ]] || x=0
+        [[ "$y" =~ ^[0-9]+$ ]] || y=0
+        ((10#$x > 10#$y)) && return 0
+        ((10#$x < 10#$y)) && return 1
+    done
+    return 1
+}
+
+# 每次运行自动检查更新；任何失败都静默跳过，绝不阻塞主流程
+oc_self_update() {
+    [[ "${OC_NO_UPDATE:-0}" == "1" ]] && return 0
+    local url="${OC_UPDATE_URL:-}" tmp ver src target dir newf
+    local -a urls=()
+    [[ -n "$url" ]] || return 0
+    command -v curl >/dev/null 2>&1 || return 0
+    tmp="$(mktemp 2>/dev/null)" || return 0
+    urls=("$url")
+    local m; m="$(dl_mirror_url "$url")"
+    [[ -n "$m" && "$m" != "$url" ]] && urls+=("$m")
+    local ok=0
+    for src in "${urls[@]}"; do
+        if curl -fsSL --connect-timeout 3 --max-time 8 -o "$tmp" "$src" 2>/dev/null; then
+            ok=1; break
+        fi
+    done
+    ((ok)) || { rm -f "$tmp"; return 0; }
+    ver="$(sed -n 's/^OC_VERSION="\([0-9][0-9.]*\)"$/\1/p' "$tmp" | head -1)"
+    if [[ -z "$ver" ]] || ! oc_version_gt "$ver" "$OC_VERSION"; then
+        rm -f "$tmp"; return 0
     fi
-    local tmp
-    tmp="$(mktemp)"
-    if dl_fetch "$OC_UPDATE_URL" "$tmp"; then
-        bash -n "$tmp" || { rm -f "$tmp"; oc_err "下载内容不是合法脚本"; return 1; }
-        install -m 755 "$tmp" "$OC_ENTRY" && oc_ok "已更新到最新版本"
-        rm -f "$tmp"
-        oc_info "重新执行 oneclick 生效"
-    else
-        oc_err "下载失败"
+    bash -n "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    # 目标：优先当前脚本文件；bash <(curl) 这类管道运行退回命令入口
+    target=""
+    if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+        target="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/$(basename "${BASH_SOURCE[0]}")"
     fi
+    [[ -n "$target" ]] || target="$OC_ENTRY"
+    dir="$(dirname "$target")"
+    if [[ ! -w "$dir" && ! -w "$target" ]]; then
+        target="$OC_ENTRY"; dir="$(dirname "$target")"
+    fi
+    mkdir -p "$dir" 2>/dev/null || true
+    # 同目录临时文件 + mv 原子替换：正在运行的 bash 仍读旧 inode，不会被截断
+    newf="$dir/.oneclick.new.$$"
+    if cp "$tmp" "$newf" 2>/dev/null && chmod 755 "$newf" && mv -f "$newf" "$target" 2>/dev/null; then
+        [[ "$target" == "$OC_ENTRY" ]] && ln -sf oneclick "$dir/oc" 2>/dev/null
+        oc_ok "发现新版本 v$ver，已自动更新（下次运行生效）"
+    fi
+    rm -f "$newf" "$tmp"
 }
 
 _up_kernels() {
@@ -544,6 +572,7 @@ main() {
         version) printf 'oneclick %s\n' "$OC_VERSION"; return 0 ;;
     esac
     oc_require_root
+    oc_self_update
     os_detect
     export DEBIAN_FRONTEND=noninteractive
     # 基础依赖按需自动补齐（只装缺失项，已齐时是空操作）
