@@ -60,10 +60,10 @@ share_render_uri() {
     "$fn"
 }
 
-# share_render_clash [outfile|stdout] —— 完整可导入的 Clash 配置
+# share_render_clash [outfile|stdout] —— 只输出节点片段（可直接粘到已有 proxies: 下）
 share_render_clash() {
-    local out="${1:-stdout}" key fn frag name body
-    local -a frags=() names=()
+    local out="${1:-stdout}" key fn frag body
+    local -a frags=()
     for key in "${OC_PROTOS[@]}"; do
         db_is_installed "$key" || continue
         fn="$(_share_fn "$key" clash)"
@@ -72,36 +72,19 @@ share_render_clash() {
             continue
         fi
         frags+=("$frag")
-        # 片段里的 name 就是协议标题，代理组按同一套名字引用，避免两处名字漂移
-        names+=("${OC_PROTO_TITLE[$key]:-$key}")
     done
     if [[ ${#frags[@]} -eq 0 ]]; then
         oc_err "没有可用的已安装协议，无法生成 Clash 订阅"
         return 1
     fi
-    body="$(
-        printf 'mixed-port: 7897\n'
-        printf 'allow-lan: false\n'
-        printf 'mode: rule\n'
-        printf 'log-level: info\n'
-        printf 'proxies:\n'
-        for frag in "${frags[@]}"; do printf '%s\n' "$frag"; done
-        printf 'proxy-groups:\n'
-        printf '  - name: PROXY\n'
-        printf '    type: select\n'
-        printf '    proxies:\n'
-        for name in "${names[@]}"; do printf '      - "%s"\n' "$name"; done
-        printf 'rules:\n'
-        printf '  - GEOIP,CN,DIRECT\n'
-        printf '  - MATCH,PROXY\n'
-    )"
+    body="$(for frag in "${frags[@]}"; do printf '%s\n' "$frag"; done)"
     _share_write "Clash" "$out" "$body"
 }
 
-# share_render_surge [outfile|stdout] —— 完整可导入的 Surge conf
+# share_render_surge [outfile|stdout] —— 只输出节点行（可直接粘到已有 [Proxy] 段）
 share_render_surge() {
-    local out="${1:-stdout}" key fn frag name joined body
-    local -a frags=() names=()
+    local out="${1:-stdout}" key fn frag body
+    local -a frags=()
     for key in "${OC_PROTOS[@]}"; do
         db_is_installed "$key" || continue
         # Surge 没有 VLESS 策略类型（手册 policies/ 下无 vless 页），REALITY 节点只输出到
@@ -113,36 +96,20 @@ share_render_surge() {
             continue
         fi
         frags+=("$frag")
-        names+=("${OC_PROTO_TITLE[$key]:-$key}")
     done
     if [[ ${#frags[@]} -eq 0 ]]; then
         oc_err "没有可用的已安装协议，无法生成 Surge 订阅"
         return 1
     fi
-    joined="$(printf '%s, ' "${names[@]}")"
-    joined="${joined%, }"
-    body="$(
-        printf '[General]\n'
-        printf 'loglevel = notify\n'
-        printf '\n'
-        printf '[Proxy]\n'
-        for frag in "${frags[@]}"; do printf '%s\n' "$frag"; done
-        printf '\n'
-        printf '[Proxy Group]\n'
-        printf 'PROXY = select, %s\n' "$joined"
-        printf '\n'
-        printf '[Rule]\n'
-        printf 'GEOIP,CN,DIRECT\n'
-        printf 'FINAL,PROXY,dns-failed\n'
-    )"
+    body="$(for frag in "${frags[@]}"; do printf '%s\n' "$frag"; done)"
     _share_write "Surge" "$out" "$body"
 }
 
-# share_render_loon [outfile|stdout] —— 完整可导入的 Loon 配置
-# Loon 没有 Snell 支持（官方手册与 Sub-Store 的 Loon 分支都不含 snell），这里跳过该节点。
+# share_render_loon [outfile|stdout] —— 只输出节点行（可直接粘到已有 [Proxy] 段）
+# Loon 没有 Snell 支持（官方文档协议清单与订阅 URI 列表都不含 snell），这里跳过该节点。
 share_render_loon() {
-    local out="${1:-stdout}" key fn frag name joined body
-    local -a frags=() names=()
+    local out="${1:-stdout}" key fn frag body
+    local -a frags=()
     for key in "${OC_PROTOS[@]}"; do
         db_is_installed "$key" || continue
         [[ "$key" == "snell" ]] && continue
@@ -152,34 +119,17 @@ share_render_loon() {
             continue
         fi
         frags+=("$frag")
-        names+=("$(oc_loon_name "$key")")
     done
     if [[ ${#frags[@]} -eq 0 ]]; then
         oc_err "没有可用的已安装协议，无法生成 Loon 订阅"
         return 1
     fi
-    joined="$(printf '%s,' "${names[@]}")"
-    joined="${joined%,}"
-    body="$(
-        printf '[General]\n'
-        printf 'internet-test-url = http://wifi.vivo.com.cn/generate_204\n'
-        printf 'proxy-test-url = http://cp.cloudflare.com/generate_204\n'
-        printf 'test-timeout = 5\n'
-        printf '\n'
-        printf '[Proxy]\n'
-        for frag in "${frags[@]}"; do printf '%s\n' "$frag"; done
-        printf '\n'
-        printf '[Proxy Group]\n'
-        printf 'PROXY = select,%s\n' "$joined"
-        printf '\n'
-        printf '[Rule]\n'
-        printf 'GEOIP,CN,DIRECT\n'
-        printf 'FINAL,PROXY\n'
-    )"
+    body="$(for frag in "${frags[@]}"; do printf '%s\n' "$frag"; done)"
     _share_write "Loon" "$out" "$body"
 }
 
 # share_render_singbox [outfile|stdout] —— 完整 sing-box 配置（首个出站是 selector）
+# 默认不生成；仅在 --sub --format singbox / 菜单「仅生成 sing-box」时显式调用。
 share_render_singbox() {
     local out="${1:-stdout}" key fn frag tag tags_json merged body
     local -a frags=() tags=()
@@ -349,15 +299,6 @@ share_print_links() {
         fi
         printf '\n'
     fi
-
-    fn="$(_share_fn "$key" singbox)"
-    oc_info "sing-box outbound："
-    if out="$("$fn")"; then
-        printf '%s' "$out" | jq . 2>/dev/null || printf '%s\n' "$out"
-    else
-        oc_warn "sing-box 片段生成失败"
-    fi
-    printf '\n'
 
     oc_info "扫码导入（v2rayN / NekoBox / Shadowrocket）："
     share_qr "$uri"

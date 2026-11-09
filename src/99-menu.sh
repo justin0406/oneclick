@@ -224,7 +224,7 @@ menu_sub() {
     while true; do
         local c
         c="$(oc_menu "订阅与分享" \
-            "生成全部格式（uri/clash/surge/loon/singbox）" \
+            "生成全部格式（uri/clash/surge/loon）" \
             "仅生成 URI 列表" \
             "仅生成 Clash" \
             "仅生成 Surge" \
@@ -233,12 +233,12 @@ menu_sub() {
             "查看订阅目录")" || return 0
         case "$c" in
             0) return 0 ;;
-            1) for _f in uri clash surge loon singbox; do share_render_sub "$_f" >/dev/null || true; done
+            1) for _f in uri clash surge loon; do share_render_sub "$_f" >/dev/null || true; done
                oc_ok "已生成到 $OC_SUB_DIR"; ls -l "$OC_SUB_DIR" 2>/dev/null; oc_pause ;;
             2) share_render_uri >/dev/null && oc_ok "URI 列表已生成" ;;
-            3) share_render_clash >/dev/null && oc_ok "Clash 配置已生成" ;;
-            4) share_render_surge >/dev/null && oc_ok "Surge 配置已生成" ;;
-            5) share_render_loon >/dev/null && oc_ok "Loon 配置已生成" ;;
+            3) share_render_clash >/dev/null && oc_ok "Clash 节点已生成" ;;
+            4) share_render_surge >/dev/null && oc_ok "Surge 节点已生成" ;;
+            5) share_render_loon >/dev/null && oc_ok "Loon 节点已生成" ;;
             6) share_render_singbox >/dev/null && oc_ok "sing-box 配置已生成" ;;
             7) ls -l "$OC_SUB_DIR" 2>/dev/null || oc_warn "目录为空" ;;
         esac
@@ -523,7 +523,9 @@ cli_run() {
         status)    cli_status ;;
         list)      cli_list ;;
         cert-status) cert_status ;;
-        sub)       local f; for f in uri clash surge loon singbox; do share_render_sub "$f" || exit 1; done ;;
+        sub)       local f; local -a fs=(uri clash surge loon)
+                   [[ -n "${OC_ARG_FORMAT:-}" ]] && fs=("$OC_ARG_FORMAT")
+                   for f in "${fs[@]}"; do share_render_sub "$f" || exit 1; done ;;
         check-ip)  local ip; ip="$(net_primary_ip)"; [[ -n "$ip" ]] && { db_setting ip "$ip"; printf '%s\n' "$ip"; } || oc_die "检测失败" ;;
         help|"")   oc_usage ;;
         version)   printf 'oneclick %s\n' "$OC_VERSION" ;;
@@ -543,7 +545,8 @@ OneClick 一键多协议代理安装器
   oneclick --link <key> [--format uri|clash|surge|loon|singbox|qr]
   oneclick --status [--format json]
   oneclick --list
-  oneclick --sub                              生成四种订阅产物
+  oneclick --sub [--format uri|clash|surge|loon|singbox]
+                                               生成节点片段（默认不含 sing-box）
   oneclick --cert-status
   oneclick --check-ip
   oneclick --version | --help

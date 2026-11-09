@@ -112,9 +112,10 @@ nft list ruleset 2>/dev/null | grep -c oneclick || iptables-save | grep -c onecl
 
 ## 9. 订阅可用性（客户端侧）
 
-- Clash/Mihomo：直接导入 `/etc/oneclick/sub/oneclick-clash.yaml`（Snell v6 会因 mihomo 不支持被跳过，属预期）
-- Surge：导入 `oneclick-surge.conf`，Snell v6 / AnyTLS / Hysteria2 均走 Surge 原生节点行
-- sing-box 客户端：导入 `oneclick-singbox.json`
+- Clash/Mihomo：把 `oneclick-clash.yaml` 的节点项粘到已有配置的 `proxies:` 下（Snell v6 需 mihomo 不支持，属预期）
+- Surge：把 `oneclick-surge.conf` 的节点行粘到 `[Proxy]` 段，Snell v6 / AnyTLS / Hysteria2 均走原生语法
+- Loon：把 `oneclick-loon.conf` 的节点行粘到 `[Proxy]` 段
+- sing-box 默认不生成；需要时 `oneclick --sub --format singbox` 或菜单「仅生成 sing-box」
 
 ## 回传模板（每步失败时填）
 
@@ -173,6 +174,7 @@ cat /etc/oneclick/sub/oneclick-loon.conf
 # 类型名按官方现行文档大写：VLESS / Shadowsocks / Hysteria2 / AnyTLS；
 # Hysteria2 与 AnyTLS 的 SNI 参数用 sni=；SS 行带 shadow-tls-password="..." 与 udp-port=<SS 端口>。
 # Loon 里导入：配置 -> 添加配置 -> 从文件/URL 导入
+# 文件里只有节点行（没有 [General]/[Proxy Group]/[Rule]），粘到现有配置的 [Proxy] 段即可
 oneclick --link anytls --format loon   # 单个节点行，便于手工粘贴
 
 # 版本门槛（官方频道 LoonNews 公告）：REALITY >= 3.3.0，AnyTLS >= 3.3.9，
