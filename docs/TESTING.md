@@ -169,10 +169,16 @@ iptables -t nat -S | grep oneclick-hop     # 端口跳跃规则也在
 
 # 10.10 Loon
 cat /etc/oneclick/sub/oneclick-loon.conf
-# 期望：4 个节点（VLESS-Reality / Hysteria2 / SS-Rust / AnyTLS），不含 Snell；
-# SS-Rust 行带 shadow-tls-* 与 udp-port=<SS 端口>；Hysteria2 行带 server-ports="<端口段>"
-# Loon 里导入：配置 -> 添加配置 -> 从文件/URL 导入；节点名不能有空格的版本才稳妥
+# 期望：4 个节点（VLESS-Reality / Hysteria2 / SS-Rust / AnyTLS），不含 Snell（Loon 不支持 Snell）。
+# 类型名按官方现行文档大写：VLESS / Shadowsocks / Hysteria2 / AnyTLS；
+# Hysteria2 与 AnyTLS 的 SNI 参数用 sni=；SS 行带 shadow-tls-password="..." 与 udp-port=<SS 端口>。
+# Loon 里导入：配置 -> 添加配置 -> 从文件/URL 导入
 oneclick --link anytls --format loon   # 单个节点行，便于手工粘贴
+
+# 版本门槛（官方频道 LoonNews 公告）：REALITY >= 3.3.0，AnyTLS >= 3.3.9，
+# Hysteria2 端口跳跃 >= 3.4.0；老版本会忽略对应节点。
+# 注意 server-ports 的分隔符官方两处材料不一致（文档写 "20000:20100"，官方模板写 "443,8443-8450"）；
+# 本脚本沿用后者（连字符），若某版本不识别，改成冒号形式再试。
 
 # 10.11 客户端导入兼容性
 cat /etc/oneclick/sub/oneclick-surge.conf   # 不应出现 vless 行（Surge 不支持 VLESS）

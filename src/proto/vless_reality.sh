@@ -557,6 +557,6 @@ proto_vless_reality_loon() {
     pub="$(db_get "$key" public_key "")"
     [[ -n "$ip" && -n "$uuid" && -n "$sid" && -n "$pub" ]] || return 1
     name="$(oc_loon_name "$key")"
-    printf '%s=vless,%s,%s,"%s",transport=tcp,over-tls=true,skip-cert-verify=true,tls-profile=chrome,flow=xtls-rprx-vision,sni=%s,public-key="%s",short-id=%s,udp=true\n' \
+    printf '%s = VLESS,%s,%s,"%s",transport=tcp,over-tls=true,tls-profile=chrome,flow=xtls-rprx-vision,sni=%s,public-key="%s",short-id=%s,udp=true\n' \
         "$name" "$ip" "$port" "$uuid" "$sni" "$pub" "$sid"
 }

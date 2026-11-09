@@ -479,8 +479,8 @@ proto_anytls_loon() {
     port="$(db_get anytls port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
-    line="$(oc_loon_name anytls)=anytls,$(ocp_anytls_ip),${port},\"${pw}\""
-    line+=",tls-name=${sni}"
+    line="$(oc_loon_name anytls) = AnyTLS,$(ocp_anytls_ip),${port},\"${pw}\""
+    line+=",sni=${sni}"
     [[ "$(ocp_anytls_insecure)" == "1" ]] && line+=",skip-cert-verify=true"
     line+=",udp=true"
     printf '%s\n' "$line"

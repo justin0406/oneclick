@@ -1069,11 +1069,11 @@ proto_ss_rust_loon() {
         stls_pw="$(db_get ss_rust stls_password "")"
         stls_sni="$(db_get ss_rust stls_sni "")"
         if [[ -n "$stls_port" && -n "$stls_pw" && -n "$stls_sni" ]]; then
-            printf '%s=shadowsocks,%s,%s,%s,"%s",shadow-tls-password=%s,shadow-tls-sni=%s,shadow-tls-version=3,udp-port=%s,udp=true\n' \
+            printf '%s = Shadowsocks,%s,%s,%s,"%s",shadow-tls-password=\"%s\",shadow-tls-sni=%s,shadow-tls-version=3,udp-port=%s,udp=true\n' \
                 "$name" "$host" "$stls_port" "$method" "$password" "$stls_pw" "$stls_sni" "$port"
             return 0
         fi
     fi
-    printf '%s=shadowsocks,%s,%s,%s,"%s",udp=true\n' \
+    printf '%s = Shadowsocks,%s,%s,%s,"%s",udp=true\n' \
         "$name" "$host" "$port" "$method" "$password"
 }

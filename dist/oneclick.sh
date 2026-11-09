@@ -3021,7 +3021,7 @@ proto_vless_reality_loon() {
     pub="$(db_get "$key" public_key "")"
     [[ -n "$ip" && -n "$uuid" && -n "$sid" && -n "$pub" ]] || return 1
     name="$(oc_loon_name "$key")"
-    printf '%s=vless,%s,%s,"%s",transport=tcp,over-tls=true,skip-cert-verify=true,tls-profile=chrome,flow=xtls-rprx-vision,sni=%s,public-key="%s",short-id=%s,udp=true\n' \
+    printf '%s = VLESS,%s,%s,"%s",transport=tcp,over-tls=true,tls-profile=chrome,flow=xtls-rprx-vision,sni=%s,public-key="%s",short-id=%s,udp=true\n' \
         "$name" "$ip" "$port" "$uuid" "$sni" "$pub" "$sid"
 }
 
@@ -3591,9 +3591,9 @@ proto_hysteria2_loon() {
     hop="$(db_get hysteria2 hop "")"
     obfs="$(db_get hysteria2 obfs off)"
     obfs_pw="$(db_get hysteria2 obfs_password "")"
-    line="$(oc_loon_name hysteria2)=Hysteria2,$(ocp_hy2_ip),${port},\"${pw}\""
+    line="$(oc_loon_name hysteria2) = Hysteria2,$(ocp_hy2_ip),${port},\"${pw}\""
     [[ -n "$hop" ]] && line+=",server-ports=\"${hop}\""
-    line+=",tls-name=${sni}"
+    line+=",sni=${sni}"
     [[ "$(ocp_hy2_insecure)" == "1" ]] && line+=",skip-cert-verify=true"
     [[ "$obfs" == "salamander" && -n "$obfs_pw" ]] && line+=",salamander-password=${obfs_pw}"
     line+=",udp=true"
@@ -5218,12 +5218,12 @@ proto_ss_rust_loon() {
         stls_pw="$(db_get ss_rust stls_password "")"
         stls_sni="$(db_get ss_rust stls_sni "")"
         if [[ -n "$stls_port" && -n "$stls_pw" && -n "$stls_sni" ]]; then
-            printf '%s=shadowsocks,%s,%s,%s,"%s",shadow-tls-password=%s,shadow-tls-sni=%s,shadow-tls-version=3,udp-port=%s,udp=true\n' \
+            printf '%s = Shadowsocks,%s,%s,%s,"%s",shadow-tls-password=\"%s\",shadow-tls-sni=%s,shadow-tls-version=3,udp-port=%s,udp=true\n' \
                 "$name" "$host" "$stls_port" "$method" "$password" "$stls_pw" "$stls_sni" "$port"
             return 0
         fi
     fi
-    printf '%s=shadowsocks,%s,%s,%s,"%s",udp=true\n' \
+    printf '%s = Shadowsocks,%s,%s,%s,"%s",udp=true\n' \
         "$name" "$host" "$port" "$method" "$password"
 }
 
@@ -5709,8 +5709,8 @@ proto_anytls_loon() {
     port="$(db_get anytls port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
-    line="$(oc_loon_name anytls)=anytls,$(ocp_anytls_ip),${port},\"${pw}\""
-    line+=",tls-name=${sni}"
+    line="$(oc_loon_name anytls) = AnyTLS,$(ocp_anytls_ip),${port},\"${pw}\""
+    line+=",sni=${sni}"
     [[ "$(ocp_anytls_insecure)" == "1" ]] && line+=",skip-cert-verify=true"
     line+=",udp=true"
     printf '%s\n' "$line"
