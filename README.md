@@ -70,8 +70,9 @@ port hopping, hysteria itself installs and cleans up the redirect rules for its 
 mirror prefix (`OC_GH_PROXY`), SHA-256 verification when a digest is available, and rollback on failure
 
 **It updates itself.** On every run the script fetches `dist/oneclick.sh` from this repository, compares
-the embedded `OC_VERSION`, and atomically replaces itself when a newer version exists. The check is
-silent on failure (offline, mirror down, bad response) and never blocks the menu. Set
+the embedded `OC_VERSION`, atomically replaces itself and re-executes the new version immediately
+when one exists. The check is silent on failure (offline, mirror down, bad response) and never blocks
+the menu. Set
 `OC_NO_UPDATE=1` to skip it, or `OC_UPDATE_URL` to point at your own mirror. No menu item, no cron.
 so no half-written file is left behind.
 

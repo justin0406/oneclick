@@ -9,7 +9,7 @@
 
 umask 077
 
-OC_VERSION="0.2.0"
+OC_VERSION="0.2.1"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -37,6 +37,8 @@ OC_ARG_CERT_MODE=""
 OC_ARG_FORMAT=""
 OC_CLI_ACTION=""
 OC_CLI_KEY=""
+# 原始参数（自动更新后 exec 自身时复用）
+OC_ARGV=()
 
 # 协议注册表：key 用下划线（函数名可用），展示名与 unit 用连字符
 OC_PROTOS=(vless_reality hysteria2 snell ss_rust anytls)

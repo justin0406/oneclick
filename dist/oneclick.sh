@@ -9,7 +9,7 @@
 
 umask 077
 
-OC_VERSION="0.2.0"
+OC_VERSION="0.2.1"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -37,6 +37,8 @@ OC_ARG_CERT_MODE=""
 OC_ARG_FORMAT=""
 OC_CLI_ACTION=""
 OC_CLI_KEY=""
+# 原始参数（自动更新后 exec 自身时复用）
+OC_ARGV=()
 
 # 协议注册表：key 用下划线（函数名可用），展示名与 unit 用连字符
 OC_PROTOS=(vless_reality hysteria2 snell ss_rust anytls)
@@ -5277,6 +5279,7 @@ oc_version_gt() {
 
 # 每次运行自动检查更新；任何失败都静默跳过，绝不阻塞主流程
 oc_self_update() {
+    [[ "${OC_JUST_UPDATED:-0}" == "1" ]] && return 0
     [[ "${OC_NO_UPDATE:-0}" == "1" ]] && return 0
     local url="${OC_UPDATE_URL:-}" tmp ver src target dir newf
     local -a urls=()
@@ -5313,7 +5316,15 @@ oc_self_update() {
     newf="$dir/.oneclick.new.$$"
     if cp "$tmp" "$newf" 2>/dev/null && chmod 755 "$newf" && mv -f "$newf" "$target" 2>/dev/null; then
         [[ "$target" == "$OC_ENTRY" ]] && ln -sf oneclick "$dir/oc" 2>/dev/null
-        oc_ok "发现新版本 v$ver，已自动更新（下次运行生效）"
+        oc_ok "发现新版本 v$ver，已自动更新"
+        rm -f "$newf" "$tmp"
+        # 直接用新版本重启当前进程；OC_JUST_UPDATED 防止重复检查形成环路
+        if [[ -x "$target" ]]; then
+            OC_JUST_UPDATED=1
+            export OC_JUST_UPDATED
+            exec "$target" "${OC_ARGV[@]}"
+        fi
+        return 0
     fi
     rm -f "$newf" "$tmp"
 }
@@ -5471,6 +5482,7 @@ oc_parse_args() {
 }
 
 main() {
+    OC_ARGV=("$@")
     # 先解析参数：--help/--version 不需要 root，也不该触发系统探测与依赖安装
     oc_parse_args "$@"
     case "$OC_CLI_ACTION" in
