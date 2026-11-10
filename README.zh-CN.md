@@ -37,13 +37,14 @@ sudo oc --link snell --format surge
 
 | 协议 | 服务端 | 端口 | 证书 | 说明 |
 |---|---|---|---|---|
-| VLESS-Reality | xray-core | 随机高位端口 | 不需要 | REALITY + x25519，抗主动探测最强，建议作为主协议 |
+| VLESS-Reality | xray-core | 默认 443（可选随机） | 不需要 | REALITY + x25519，抗主动探测最强，建议作为主协议 |
 | Hysteria2 | hysteria | 随机高位 UDP | 自签 / ACME / 已有 | QUIC，高丢包网络表现好，支持 salamander 混淆与端口跳跃 |
 | Snell v6 | snell-server 6.0.0 | 随机高位 TCP | 不需要 | 单端口、PSK 认证，Surge 生态原生支持 |
 | SS-Rust | ssserver | 随机高位 TCP + UDP | 仅 ShadowTLS 需要 | 默认 SS2022；ShadowTLS v3（strict）伪装可选、默认关闭，客户端需支持 v3（如 mihomo / Clash Meta） |
 | AnyTLS | sing-box | 随机高位 TCP | **必须**自签 / ACME / 已有 | 低特征 TLS 代理，Surge、Loon、sing-box 客户端均可使用 |
 
-端口在安装时于 `20000-60000` 内随机选取（TCP 与 UDP 都确认空闲），重装保持原值；
+端口默认在 `20000-60000` 内随机选取（TCP 与 UDP 都确认空闲），重装保持原值；
+VLESS-Reality 例外：安装时询问是否用 443（Y，伪装最优），选 N 才用随机高位端口；
 可用 `--port` 指定；REALITY 仍建议使用独占端口。
 
 SS-Rust 固定使用 SS2022（`2022-blake3-aes-128-gcm`），安装时不再询问——服务端没有任何

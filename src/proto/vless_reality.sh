@@ -49,11 +49,19 @@ ocp_vless_reality_keys() {
 # 端口协商：OC_ARG_PORT > 交互（默认随机高位端口）；占用时提示换端口。
 ocp_vless_reality_port() {
     local port="${OC_ARG_PORT:-}" alt def
-    # 契约顺序：OC_ARG_PORT -> meta 的 port -> 交互；meta 未装时随机取高位端口
+    # 契约顺序：OC_ARG_PORT -> 已装端口 -> 交互（Y=443，N=随机高位）
     def="$(proto_vless_reality_meta | sed -n 's/^port=//p')"
-    [[ -z "$def" ]] && def="$(net_port_random)"
     if [[ -z "$port" ]]; then
-        port="$(ocp_vless_reality_ask "REALITY 监听端口" "$def")"
+        if [[ -n "$def" ]]; then
+            port="$def"
+        elif [[ "$OC_YES" == "1" ]]; then
+            port=443
+        elif oc_confirm "VLESS-Reality 使用 443 端口（伪装最优，推荐）？选 N 则用随机高位端口" y; then
+            port=443
+        else
+            port="$(net_port_random)"
+            oc_info "已选随机高位端口：$port"
+        fi
     fi
     port="$(printf '%s' "$port" | tr -d '[:space:]')"
     [[ "$port" =~ ^[0-9]+$ ]] || oc_die "端口必须是数字：$port"
@@ -64,9 +72,9 @@ ocp_vless_reality_port() {
             oc_die "端口 $port 已被占用（--port 指定）；可换空闲端口，例如 --port ${alt:-$def}"
         fi
         oc_warn "端口 $port 已被占用；VLESS-Reality 需要一个独占端口"
-        alt="$(net_port_pick "$port" tcp)"
-        [[ -z "$alt" || "$alt" == "$port" ]] && oc_die "找不到可用端口，已取消安装"
-        if ! oc_confirm "改用空闲端口 $alt ？" y; then
+        alt="$(net_port_random)"
+        [[ -z "$alt" ]] && oc_die "找不到可用端口，已取消安装"
+        if ! oc_confirm "改用随机高位端口 $alt ？" y; then
             oc_die "已取消安装"
         fi
         port="$alt"
