@@ -228,9 +228,29 @@ menu_cert() {
 
 # ---------- 4. 订阅 ----------
 
+# 生成并直接显示内容：菜单里选格式就是为了马上看到/复制，不是只落个文件
+_sub_preview() {
+    local fmt="$1" path n
+    path="$(share_render_sub "$fmt")" || {
+        oc_err "生成失败（是否还没安装协议？）"
+        return 1
+    }
+    # 路径已经由 share 层打印（[*] X 订阅已写入：…），这里不再重复
+    echo
+    if [[ "$fmt" == "singbox" ]]; then
+        n="$(wc -l < "$path" 2>/dev/null | tr -d ' ')"
+        oc_info "内容（共 ${n:-0} 行，前 40 行）："
+        head -n 40 "$path" | sed 's/^/  /'
+        [[ "${n:-0}" -gt 40 ]] && oc_info "其余 $((n - 40)) 行见文件"
+    else
+        oc_info "内容："
+        sed 's/^/  /' "$path"
+    fi
+}
+
 menu_sub() {
     while true; do
-        local c
+        local c f
         c="$(oc_menu "订阅与分享" \
             "生成全部" \
             "URI 列表" \
@@ -241,16 +261,24 @@ menu_sub() {
             "订阅目录")" || return 0
         case "$c" in
             0) return 0 ;;
-            1) for _f in uri clash surge loon; do share_render_sub "$_f" >/dev/null || true; done
-               oc_ok "已生成到 $OC_SUB_DIR"; ls -l "$OC_SUB_DIR" 2>/dev/null; oc_pause ;;
-            2) share_render_uri >/dev/null && oc_ok "URI 列表已生成" ;;
-            3) share_render_clash >/dev/null && oc_ok "Clash 节点已生成" ;;
-            4) share_render_surge >/dev/null && oc_ok "Surge 节点已生成" ;;
-            5) share_render_loon >/dev/null && oc_ok "Loon 节点已生成" ;;
-            6) share_render_singbox >/dev/null && oc_ok "sing-box 配置已生成" ;;
-            7) ls -l "$OC_SUB_DIR" 2>/dev/null || oc_warn "目录为空" ;;
+            1) for f in uri clash surge loon; do
+                   share_render_sub "$f" >/dev/null || oc_warn "$f 生成失败"
+               done
+               oc_ok "已生成到 $OC_SUB_DIR"
+               for f in "$OC_SUB_DIR"/oneclick-*; do
+                   [[ -f "$f" ]] || continue
+                   oc_kv "$(basename "$f")" "$(wc -c < "$f" | tr -d ' ') 字节"
+               done
+               oc_pause ;;
+            2) _sub_preview uri; oc_pause ;;
+            3) _sub_preview clash; oc_pause ;;
+            4) _sub_preview surge; oc_pause ;;
+            5) _sub_preview loon; oc_pause ;;
+            6) _sub_preview singbox; oc_pause ;;
+            7) oc_kv "订阅目录" "$OC_SUB_DIR"
+               ls -l "$OC_SUB_DIR" 2>/dev/null || oc_warn "目录为空"
+               oc_pause ;;
         esac
-        [[ "$c" != "1" && "$c" != "7" ]] && oc_pause
     done
 }
 
