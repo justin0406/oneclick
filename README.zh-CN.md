@@ -46,6 +46,9 @@ sudo oc --link snell --format surge
 端口在安装时于 `20000-60000` 内随机选取（TCP 与 UDP 都确认空闲），重装保持原值；
 可用 `--port` 指定；REALITY 仍建议使用独占端口。
 
+SS-Rust 固定使用 SS2022（`2022-blake3-aes-128-gcm`），安装时不再询问——服务端没有任何
+信号能判断客户端能力。老客户端请加 `--method chacha20-ietf-poly1305`（或 `aes-256-gcm`）。
+
 > AnyTLS 用 sing-box 而非 anytls-go：后者服务端的 TLS 是进程内生成的 1 小时临时证书（无 SAN），
 > 无法使用脚本签发的证书；sing-box 的 anytls inbound 支持 `certificate_path` / `key_path`。
 

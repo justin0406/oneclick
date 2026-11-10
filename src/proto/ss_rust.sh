@@ -23,7 +23,6 @@ OC_SSRUST_STLS_FALLBACK_VER="0.2.25"
 
 # 默认方法与兼容退路：默认 SS2022（抗重放、无 IV 复用风险）；老客户端不支持时可选 AEAD
 OC_SSRUST_METHOD="${OC_SSRUST_METHOD:-2022-blake3-aes-128-gcm}"
-OC_SSRUST_METHOD_COMPAT="chacha20-ietf-poly1305"
 # ShadowTLS 伪装 SNI：需可直连、支持 TLS1.3 的真实 HTTPS 站点。
 # 服务端 fallback 必须与客户端 SNI 指向同一站点（见写配置处），否则已认证客户端
 # 会被转发到 SNI 不匹配的站点并立刻断开（已在 Debian 13 VPS 上复现）。
@@ -230,20 +229,29 @@ ocp_ssrust_pw_gen() {
     printf '%s' "$pw"
 }
 
-# 方法选择：重装时状态库里的方法仍与密码兼容就沿用（客户端不用改）；
-# 否则默认 SS2022，并给老客户端留一条 AEAD 退路。
+# 方法选择：不交互。优先级 --method > 已装方法（密码兼容则沿用）> OC_SSRUST_METHOD > 默认 SS2022。
+# 客户端是否支持 SS2022 在服务端无法探测（没有任何握手特征可查），所以默认选更新的
+# SS2022，老客户端用 --method chacha20-ietf-poly1305 显式指定。
 ocp_ssrust_pick_method() {
     local old_method old_pw method
-    old_method="$(db_get ss_rust method "")"
-    old_pw="$(db_get ss_rust password "")"
-    if [[ -n "$old_method" ]] && ocp_ssrust_pw_ok "$old_method" "$old_pw"; then
-        printf '%s' "$old_method"
-        return 0
+    method="${OC_ARG_METHOD:-}"
+    if [[ -z "$method" ]]; then
+        old_method="$(db_get ss_rust method "")"
+        old_pw="$(db_get ss_rust password "")"
+        if [[ -n "$old_method" ]] && ocp_ssrust_pw_ok "$old_method" "$old_pw"; then
+            printf '%s' "$old_method"
+            return 0
+        fi
+        method="$OC_SSRUST_METHOD"
     fi
-    method="$OC_SSRUST_METHOD"
-    if oc_confirm "改用兼容模式 ${OC_SSRUST_METHOD_COMPAT}（老客户端不支持 SS2022 时选是）？" n; then
-        method="$OC_SSRUST_METHOD_COMPAT"
-    fi
+    case "$method" in
+        2022-*|aes-128-gcm|aes-192-gcm|aes-256-gcm|chacha20-ietf-poly1305|chacha20-poly1305|aes-128-ctr|aes-192-ctr|aes-256-ctr|aes-128-cfb|aes-192-cfb|aes-256-cfb|xchacha20-ietf-poly1305|plain)
+            ;;
+        *)
+            oc_err "不支持的加密方式：$method（可用：2022-blake3-aes-128-gcm / chacha20-ietf-poly1305 等）"
+            return 1
+            ;;
+    esac
     printf '%s' "$method"
 }
 

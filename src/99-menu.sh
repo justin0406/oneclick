@@ -536,6 +536,7 @@ OneClick 一键多协议代理安装器
 用法：
   oneclick                                    交互菜单
   oneclick --install <key> [--port N] [--domain D] [--sni S] [--cert-mode M] [--yes]
+  oneclick --install ss_rust [--method chacha20-ietf-poly1305]   老客户端兼容加密方式
   oneclick --uninstall <key> [--yes]
   oneclick --regen <key>
   oneclick --link <key> [--format uri|clash|surge|loon|singbox|qr]
@@ -563,6 +564,7 @@ oc_parse_args() {
             --port)   [[ -n "${2:-}" ]] || oc_die "--port 需要端口"; OC_ARG_PORT="$2"; shift 2 ;;
             --domain) [[ -n "${2:-}" ]] || oc_die "--domain 需要域名"; OC_ARG_DOMAIN="$2"; shift 2 ;;
             --sni)    [[ -n "${2:-}" ]] || oc_die "--sni 需要值"; OC_ARG_SNI="$2"; shift 2 ;;
+            --method) [[ -n "${2:-}" ]] || oc_die "--method 需要值"; OC_ARG_METHOD="$2"; shift 2 ;;
             --cert-mode) [[ -n "${2:-}" ]] || oc_die "--cert-mode 需要值"; OC_ARG_CERT_MODE="$2"; shift 2 ;;
             --format) [[ -n "${2:-}" ]] || oc_die "--format 需要值"; OC_ARG_FORMAT="$2"; shift 2 ;;
             -y|--yes) OC_YES=1; shift ;;

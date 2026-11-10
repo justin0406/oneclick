@@ -48,6 +48,10 @@ sudo oc --link snell --format surge
 Ports are picked at random in `20000-60000` on install (verified free for both TCP and UDP), and keep
 their value on reinstall. Pass `--port` to override; a dedicated port is still recommended for REALITY.
 
+SS-Rust always installs with SS2022 (`2022-blake3-aes-128-gcm`) and never asks — there is no
+server-side signal for client capability. For clients without SS2022, pass
+`--method chacha20-ietf-poly1305` (or `aes-256-gcm`).
+
 > **Why AnyTLS runs on sing-box instead of anytls-go:** the anytls-go server generates its TLS
 > certificate in-process — a one-hour RSA key with no SAN — so it can never use a certificate the
 > script issues. The sing-box `anytls` inbound accepts `certificate_path` / `key_path`, which is the

@@ -9,7 +9,7 @@
 
 umask 077
 
-OC_VERSION="0.2.3"
+OC_VERSION="0.2.4"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -36,6 +36,7 @@ OC_NO_UPDATE="${OC_NO_UPDATE:-0}"
 OC_ARG_PORT=""
 OC_ARG_DOMAIN=""
 OC_ARG_SNI=""
+OC_ARG_METHOD=""
 OC_ARG_CERT_MODE=""
 OC_ARG_FORMAT=""
 OC_CLI_ACTION=""
