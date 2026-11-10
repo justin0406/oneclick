@@ -8,7 +8,7 @@ It puts five server implementations behind a single CLI: VLESS-Reality, Hysteria
 SS-Rust and AnyTLS. Install, change ports, rotate certificates, generate client configs,
 back up and restore, or uninstall — all from one menu. No panel required.
 
-- Single-file release: `dist/oneclick.sh`, ~6,000 lines, run it right after download
+- Single-file release: `dist/oneclick.sh`, ~5,800 lines, run it right after download
 - Debian 13 / Ubuntu 22.04+ first, CentOS Stream / RHEL 9 compatible
 - x86_64 / aarch64 / armv7l (sing-box, used by AnyTLS, has no i386 build)
 
