@@ -334,8 +334,7 @@ proto_hysteria2_install() {
     fi
     oc_kv "服务状态" "$(proto_hysteria2_status | head -1)"
     oc_hr
-    oc_info "分享链接（URI，可直接导入客户端）："
-    proto_hysteria2_link
+    share_print_info hysteria2
 }
 
 proto_hysteria2_uninstall() {

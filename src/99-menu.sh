@@ -122,7 +122,7 @@ menu_manage() {
             "状态与日志" \
             "启动" "停止" "重启" \
             "改端口" "换凭据" "重生成" \
-            "链接" "二维码" "删除")" || return 0
+            "配置信息" "二维码" "删除")" || return 0
         case "$c" in
             0) return 0 ;;
             1) oc_title "$(oc_title_of "$k") 状态"
@@ -138,7 +138,7 @@ menu_manage() {
             5) _menu_change_port "$k"; oc_pause ;;
             6) _menu_change_pw "$k"; oc_pause ;;
             7) oc_call "$k" regen && oc_ok "配置已重生成并重启" || oc_err "重生成失败"; oc_pause ;;
-            8) oc_call "$k" link; oc_pause ;;
+            8) share_print_info "$k"; oc_pause ;;
             9) oc_call "$k" link | head -1 | while read -r l; do share_qr "$l"; done; oc_pause ;;
             10) _menu_delete "$k" && return 0 ;;
         esac

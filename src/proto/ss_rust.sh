@@ -670,8 +670,7 @@ proto_ss_rust_install() {
     oc_kv "ShadowTLS" "$([[ "$stls" == "yes" ]] && printf 'v3（入口 %s/tcp，SNI %s）' "$stls_port" "$stls_sni" || printf '未启用')"
     oc_kv "服务状态" "$(proto_ss_rust_status | head -n1)"
     oc_hr
-    oc_info "分享链接（SS2022 需较新客户端；ShadowTLS 见 plugin 参数）："
-    proto_ss_rust_link || oc_warn "暂时取不到公网 IP，稍后可用 oneclick --link ss_rust 查看"
+    share_print_info ss_rust || oc_warn "暂时取不到公网 IP，稍后可用 oneclick --link ss_rust 查看"
 }
 
 proto_ss_rust_uninstall() {

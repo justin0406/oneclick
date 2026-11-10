@@ -311,8 +311,7 @@ proto_anytls_install() {
     oc_kv "证书" "${crt_file}"
     oc_kv "服务状态" "$(proto_anytls_status | head -1)"
     oc_hr
-    oc_info "分享链接（URI，可直接导入客户端）："
-    proto_anytls_link
+    share_print_info anytls
 }
 
 proto_anytls_uninstall() {

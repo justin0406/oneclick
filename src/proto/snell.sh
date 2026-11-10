@@ -299,8 +299,7 @@ proto_snell_install() {
     oc_kv "协议版本" "6（mode=default）"
     oc_kv "服务状态" "$(proto_snell_status | head -n1)"
     oc_hr
-    oc_info "分享链接（Surge / sing-box ≥1.14 直接支持 v6；mihomo 目前只到 v5）："
-    proto_snell_link || oc_warn "暂时取不到公网 IP，稍后可用 oneclick --link snell 查看"
+    share_print_info snell || oc_warn "暂时取不到公网 IP，稍后可用 oneclick --link snell 查看"
 }
 
 proto_snell_uninstall() {

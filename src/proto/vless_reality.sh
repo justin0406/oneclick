@@ -302,9 +302,8 @@ proto_vless_reality_install() {
     oc_kv "公钥 (pbk)" "$pub"
     oc_kv "状态" "$(proto_vless_reality_status)"
     printf '\n'
-    oc_info "分享链接（可导入 v2rayN / NekoBox / Shadowrocket）："
     # 拿不到公网 IP 不该让整个安装报失败，装好后 oneclick --link 还能再取
-    proto_vless_reality_link || oc_warn "暂时取不到公网 IP，稍后用 oneclick --link vless_reality 查看链接"
+    share_print_info vless_reality || oc_warn "暂时取不到公网 IP，稍后用 oneclick --link vless_reality 查看配置信息"
     oc_warn "REALITY 需要客户端直连该端口，套 CDN 或前置反代会失效"
 }
 

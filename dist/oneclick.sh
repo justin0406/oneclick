@@ -9,7 +9,7 @@
 
 umask 077
 
-OC_VERSION="0.2.4"
+OC_VERSION="0.2.5"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -1733,6 +1733,52 @@ share_qr() {
     fi
 }
 
+# share_print_info <key> —— 安装完成后的"配置信息"：URI + Surge + Loon 三种写法。
+# Surge 没有 VLESS 策略、Loon 没有 Snell，遇到不支持的协议直接说明原因，不静默省略。
+share_print_info() {
+    local key="${1:-}" fn out
+    [[ -n "$key" ]] || {
+        oc_err "用法：share_print_info <key>"
+        return 1
+    }
+    db_is_installed "$key" || return 1
+    oc_title "配置信息：${OC_PROTO_TITLE[$key]:-$key}"
+
+    fn="$(_share_fn "$key" link)"
+    oc_info "URI："
+    if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
+        printf '  %s\n' "$out"
+    else
+        oc_warn "生成失败"
+    fi
+
+    oc_info "Surge："
+    case "$key" in
+        vless_reality) printf '  不支持（Surge 没有 VLESS 策略类型）\n' ;;
+        *)
+            fn="$(_share_fn "$key" surge)"
+            if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
+                printf '  %s\n' "$out"
+            else
+                oc_warn "生成失败"
+            fi
+            ;;
+    esac
+
+    oc_info "Loon："
+    case "$key" in
+        snell) printf '  不支持（Loon 没有 Snell 协议）\n' ;;
+        *)
+            fn="$(_share_fn "$key" loon)"
+            if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
+                printf '  %s\n' "$out"
+            else
+                oc_warn "生成失败"
+            fi
+            ;;
+    esac
+}
+
 # share_print_links <key> —— URI + 三种订阅片段 + 二维码
 share_print_links() {
     local key="${1:-}" fn uri out
@@ -1744,7 +1790,7 @@ share_print_links() {
         oc_err "协议未安装：$key"
         return 1
     fi
-    oc_title "分享：${OC_PROTO_TITLE[$key]:-$key}"
+    oc_title "配置信息：${OC_PROTO_TITLE[$key]:-$key}"
 
     fn="$(_share_fn "$key" link)"
     if ! uri="$("$fn")"; then
@@ -2093,9 +2139,8 @@ proto_vless_reality_install() {
     oc_kv "公钥 (pbk)" "$pub"
     oc_kv "状态" "$(proto_vless_reality_status)"
     printf '\n'
-    oc_info "分享链接（可导入 v2rayN / NekoBox / Shadowrocket）："
     # 拿不到公网 IP 不该让整个安装报失败，装好后 oneclick --link 还能再取
-    proto_vless_reality_link || oc_warn "暂时取不到公网 IP，稍后用 oneclick --link vless_reality 查看链接"
+    share_print_info vless_reality || oc_warn "暂时取不到公网 IP，稍后用 oneclick --link vless_reality 查看配置信息"
     oc_warn "REALITY 需要客户端直连该端口，套 CDN 或前置反代会失效"
 }
 
@@ -2681,8 +2726,7 @@ proto_hysteria2_install() {
     fi
     oc_kv "服务状态" "$(proto_hysteria2_status | head -1)"
     oc_hr
-    oc_info "分享链接（URI，可直接导入客户端）："
-    proto_hysteria2_link
+    share_print_info hysteria2
 }
 
 proto_hysteria2_uninstall() {
@@ -3201,8 +3245,7 @@ proto_snell_install() {
     oc_kv "协议版本" "6（mode=default）"
     oc_kv "服务状态" "$(proto_snell_status | head -n1)"
     oc_hr
-    oc_info "分享链接（Surge / sing-box ≥1.14 直接支持 v6；mihomo 目前只到 v5）："
-    proto_snell_link || oc_warn "暂时取不到公网 IP，稍后可用 oneclick --link snell 查看"
+    share_print_info snell || oc_warn "暂时取不到公网 IP，稍后可用 oneclick --link snell 查看"
 }
 
 proto_snell_uninstall() {
@@ -4090,8 +4133,7 @@ proto_ss_rust_install() {
     oc_kv "ShadowTLS" "$([[ "$stls" == "yes" ]] && printf 'v3（入口 %s/tcp，SNI %s）' "$stls_port" "$stls_sni" || printf '未启用')"
     oc_kv "服务状态" "$(proto_ss_rust_status | head -n1)"
     oc_hr
-    oc_info "分享链接（SS2022 需较新客户端；ShadowTLS 见 plugin 参数）："
-    proto_ss_rust_link || oc_warn "暂时取不到公网 IP，稍后可用 oneclick --link ss_rust 查看"
+    share_print_info ss_rust || oc_warn "暂时取不到公网 IP，稍后可用 oneclick --link ss_rust 查看"
 }
 
 proto_ss_rust_uninstall() {
@@ -4774,8 +4816,7 @@ proto_anytls_install() {
     oc_kv "证书" "${crt_file}"
     oc_kv "服务状态" "$(proto_anytls_status | head -1)"
     oc_hr
-    oc_info "分享链接（URI，可直接导入客户端）："
-    proto_anytls_link
+    share_print_info anytls
 }
 
 proto_anytls_uninstall() {
@@ -5066,7 +5107,7 @@ menu_manage() {
             "状态与日志" \
             "启动" "停止" "重启" \
             "改端口" "换凭据" "重生成" \
-            "链接" "二维码" "删除")" || return 0
+            "配置信息" "二维码" "删除")" || return 0
         case "$c" in
             0) return 0 ;;
             1) oc_title "$(oc_title_of "$k") 状态"
@@ -5082,7 +5123,7 @@ menu_manage() {
             5) _menu_change_port "$k"; oc_pause ;;
             6) _menu_change_pw "$k"; oc_pause ;;
             7) oc_call "$k" regen && oc_ok "配置已重生成并重启" || oc_err "重生成失败"; oc_pause ;;
-            8) oc_call "$k" link; oc_pause ;;
+            8) share_print_info "$k"; oc_pause ;;
             9) oc_call "$k" link | head -1 | while read -r l; do share_qr "$l"; done; oc_pause ;;
             10) _menu_delete "$k" && return 0 ;;
         esac
