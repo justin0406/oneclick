@@ -2,23 +2,6 @@
 # REALITY 不落地证书：借用目标站真实 TLS 握手，不需要证书库参与；
 # 私钥只存在于 /etc/oneclick/db.json 与 config.json，两者都是 600，不允许只留在内存。
 
-# 交互读取：ui.sh 的 oc_ask 把提示符也写进 stdout，$(oc_ask ...) 捕获后不可用，
-# 所以这里提示走 stderr，答案走 stdout（等 ui.sh 修好后可直接换回 oc_ask）。
-ocp_vless_reality_ask() {
-    local prompt="$1" def="${2:-}" ans
-    if [[ "$OC_YES" == "1" && -n "$def" ]]; then
-        printf '%s' "$def"
-        return 0
-    fi
-    if [[ -n "$def" ]]; then
-        printf '%s [%s]: ' "$prompt" "$def" >&2
-    else
-        printf '%s: ' "$prompt" >&2
-    fi
-    read -r ans || ans=""
-    printf '%s' "${ans:-$def}"
-}
-
 # 输出两行：私钥、公钥。优先走 cert.sh 的 reality_keypair，失败再自己解析 xray x25519。
 ocp_vless_reality_keys() {
     local tmp priv="" pub="" raw
@@ -87,7 +70,7 @@ ocp_vless_reality_port() {
 ocp_vless_reality_dest() {
     local def="${OC_ARG_SNI:-www.microsoft.com}" input sni dest
     oc_warn "提示：dest 必须是未过 CDN 的真实站点，套了 CDN 会破坏 REALITY 的 TLS 指纹"
-    input="$(ocp_vless_reality_ask "REALITY 伪装域名（回车用默认，真实域名不能过 CDN）" "$def")"
+    input="$(oc_ask "REALITY 伪装域名（回车用默认，真实域名不能过 CDN）" "$def")"
     input="$(printf '%s' "$input" | tr -d '[:space:]')"
     [[ -z "$input" ]] && input="$def"
     if [[ "$input" == *:* ]]; then
@@ -222,9 +205,11 @@ proto_vless_reality_install() {
         [[ -z "$ver" ]] && oc_die "获取 Xray-core 版本失败（网络或 GitHub API 限流），可先在设置里配 gh_proxy"
         oc_info "下载 Xray-core $ver（$asset）..."
         tmp="$(mktemp -d "${TMPDIR:-/tmp}/oneclick-xray.XXXXXX")" || oc_die "创建临时目录失败"
-        if ! dl_gh XTLS/Xray-core "$ver" "$asset" "$tmp/xray.zip"; then
+        # Xray 每个资产都有同名 .dgst（内含 SHA2-256），下载即校验
+        if ! dl_verify_fetch "https://github.com/XTLS/Xray-core/releases/download/$ver/$asset" \
+                "$tmp/xray.zip" dgst "$asset"; then
             rm -rf "$tmp"
-            oc_die "Xray-core 下载失败"
+            oc_die "Xray-core 下载或校验失败"
         fi
         if ! dl_unzip "$tmp/xray.zip" "$tmp/unzip"; then
             rm -rf "$tmp"
@@ -287,8 +272,6 @@ proto_vless_reality_install() {
         oc_die "安装中止（配置保留在 $cfg）"
     fi
     oc_ok "服务已启动：$unit"
-
-    # 先按 comment 删旧规则再放行，重装/重跑不会叠加
 
     db_set "$key" port "$port"
     db_set "$key" server_name "$sni"
@@ -482,25 +465,6 @@ proto_vless_reality_clash() {
     printf '      public-key: %s\n' "$pub"
     printf '      short-id: %s\n' "$sid"
     printf '    client-fingerprint: chrome\n'
-}
-
-proto_vless_reality_surge() {
-    local key="vless_reality" ip port uuid sni sid pub name
-    if ! db_has "$key"; then
-        oc_err "VLESS-Reality 未安装"
-        return 1
-    fi
-    ip="$(ocp_vless_reality_ip)"
-    port="$(db_get "$key" port "")"
-    uuid="$(db_get "$key" uuid "")"
-    sni="$(db_get "$key" server_name "www.microsoft.com")"
-    sid="$(db_get "$key" short_id "")"
-    pub="$(db_get "$key" public_key "")"
-    name="${OC_PROTO_TITLE[$key]:-VLESS-Reality}"
-    [[ -z "$ip" ]] && return 1
-    # Surge 的 VLESS 行：username 即 uuid；REALITY 用 reality=true + public-key/short-id
-    printf '%s = vless, %s, %s, username=%s, tls=true, sni=%s, reality=true, public-key=%s, short-id=%s, flow=xtls-rprx-vision, skip-cert-verify=true\n' \
-        "$name" "$ip" "$port" "$uuid" "$sni" "$pub" "$sid"
 }
 
 proto_vless_reality_singbox() {

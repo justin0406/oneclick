@@ -75,18 +75,28 @@ no edits to the system SSH configuration, no sysctl tuning. Only exception: if y
 port hopping, hysteria itself installs and cleans up the redirect rules for its `listen` port range.
 
 **Downloads are verifiable.** All binaries go through one download layer: three retries, an optional
-mirror prefix (`OC_GH_PROXY`), SHA-256 verification when a digest is available, and rollback on failure
+mirror prefix (`OC_GH_PROXY`), SHA-256 verification against the upstream checksum when the project
+publishes one (Xray `.dgst`, Hysteria2 `hashes.txt`, shadowsocks-rust `.sha256`), and rollback on
+failure so no half-written file is left behind. Projects that ship no checksum file (sing-box,
+shadow-tls, Snell) are verified structurally only — they must be a valid ELF binary — so a hostile
+mirror could still substitute a binary for those. Prefer running without `OC_GH_PROXY` if you cannot
+trust your mirror.
 
 **It updates itself.** On every run the script fetches `dist/oneclick.sh` from this repository, compares
 the embedded `OC_VERSION`, atomically replaces itself and re-executes the new version immediately
 when one exists. The check is silent on failure (offline, mirror down, bad response) and never blocks
-the menu. Set
-`OC_NO_UPDATE=1` to skip it, or `OC_UPDATE_URL` to point at your own mirror. No menu item, no cron.
+the menu. Because the downloaded script runs as root, the self-update **only follows the official URL**
+by default — `OC_GH_PROXY` is not applied to it. Set `OC_UPDATE_MIRROR=1` if you really want the mirror
+for updates too, `OC_NO_UPDATE=1` to skip the check, or `OC_UPDATE_URL` to point at your own copy.
+No menu item, no cron.
 so no half-written file is left behind.
 
 **Uninstall means uninstall.** Services are stopped, disabled, their units removed, and
-`daemon-reload` is run. Configs and certificates are kept only if you explicitly say so.
-`oneclick --purge` removes everything it ever created and requires typing `PURGE` to confirm.
+`daemon-reload` is run. Kernel binaries are **kept by default** on a single-protocol uninstall —
+they may be shared with a panel or another script, and deleting them silently breaks that service
+(anything still referenced by a non-OneClick unit is always kept). Choose to delete them in the
+prompt, or use `oneclick --purge` to remove everything it ever created — that one requires typing
+`PURGE` to confirm.
 
 **Single user by design.** No multi-user accounts, traffic accounting, expiry dates or Telegram bot —
 those belong in a panel. This script's job is to install and operate one machine's proxies well.
@@ -130,6 +140,18 @@ an existing config instead of replacing it.
 The build concatenates 15 modules into `dist/oneclick.sh` and runs four checks: `bash -n`,
 `shellcheck -S warning`, an undefined-function scan (command positions only, so jq field names are not
 misread), and duplicate-definition detection. Edit `src/`, never `dist/`.
+
+CI (`.github/workflows/build.yml`) runs the same build on every push and additionally fails if
+`dist/oneclick.sh` differs from what `src/` produces, plus a smoke test of `--version` / `--help`.
+
+Requires **bash 4.0+** at runtime (`declare -gA`, `${var,,}`); bash 3.2 — the macOS default — exits
+immediately with a clear message. Every supported Linux target ships bash 4 or newer.
+
+Bash unit tests live in `tests/` and run with [bats-core](https://github.com/bats-core/bats-core):
+
+```bash
+bats tests/
+```
 
 ```
 src/00-header.sh            constants, protocol registry

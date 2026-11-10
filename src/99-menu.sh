@@ -151,34 +151,64 @@ _menu_change_port() {
     new="$(oc_ask "新端口（当前 $old，回车不改）" "")"
     [[ -z "$new" || "$new" == "$old" ]] && return 0
     [[ "$new" =~ ^[0-9]+$ ]] || { oc_err "端口必须是数字"; return 1; }
-    local proto="tcp"
-    [[ "$(oc_meta_field "$k" udp)" == "yes" ]] && proto="udp"
-    net_port_in_use "$new" "$proto" && { oc_err "端口 $new 已被占用"; return 1; }
+    # ss_rust / shadowtls 是 tcp+udp，meta 只能标一个；这类协议两侧都要查，
+    # 否则改完端口 ssserver 会因 TCP 侧被占而起不来。
+    local -a protos=("tcp")
+    if [[ "$(oc_meta_field "$k" udp)" == "yes" ]]; then
+        protos=(tcp udp)
+    fi
+    local p
+    for p in "${protos[@]}"; do
+        net_port_in_use "$new" "$p" && { oc_err "端口 $new/$p 已被占用"; return 1; }
+    done
     db_set "$k" port "$new"
     if oc_call "$k" regen; then
         oc_ok "端口已改为 $new"
-    else
-        db_set "$k" port "$old"
-        oc_err "重生成失败，端口回滚为 $old"
+        return 0
     fi
+    # regen 失败时磁盘配置已是新端口、服务已停：只回滚 db 会留下 db/配置漂移，
+    # 必须用旧端口再 regen 一次把配置和服务一起拉回去。
+    oc_err "重生成失败，正在回滚到 $old ..."
+    db_set "$k" port "$old"
+    if oc_call "$k" regen >/dev/null 2>&1; then
+        oc_warn "已回滚为 $old（服务恢复原状）"
+    else
+        oc_err "回滚也失败，配置可能与状态库不一致，请检查日志后用 --regen $k 重试"
+    fi
+    return 1
 }
 
 _menu_change_pw() {
-    local k="$1" field new
+    local k="$1" field old new
     case "$k" in
         snell) field="psk" ;;
         vless_reality) field="uuid" ;;
         *) field="password" ;;
     esac
+    old="$(db_get "$k" "$field" "")"
     new="$(oc_ask "新凭据（回车自动生成）" "")"
     [[ -z "$new" ]] && new="$(os_random_token 20)"
+    # VLESS 的 uuid 必须是标准 8-4-4-4-12 形式，坏值会让 regen 永远失败
+    if [[ "$field" == "uuid" ]] &&
+        [[ ! "$new" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+        oc_err "UUID 格式不合法（需 8-4-4-4-12 十六进制），已取消"
+        return 1
+    fi
     db_set "$k" "$field" "$new"
     if oc_call "$k" regen; then
         oc_ok "凭据已更新"
         oc_kv "新凭据" "$new"
-    else
-        oc_err "重生成失败，请检查日志"
+        return 0
     fi
+    # 失败必须回滚：坏凭据留在库里会让之后每次 regen 都失败
+    oc_err "重生成失败，已回滚原凭据"
+    db_set "$k" "$field" "$old"
+    if oc_call "$k" regen >/dev/null 2>&1; then
+        oc_warn "服务已用原凭据恢复"
+    else
+        oc_err "回滚后仍启动失败，请检查日志"
+    fi
+    return 1
 }
 
 _menu_delete() {
@@ -205,8 +235,10 @@ menu_cert() {
                d="$(oc_ask "域名" "")"
                [[ -z "$d" ]] && { oc_err "域名不能为空"; oc_pause; continue; }
                os_dep_install base acme || { oc_pause; continue; }
-               if cert_acme "$d" "$OC_CERT_DIR/$d"; then
-                   oc_ok "证书就绪：$OC_CERT_DIR/$d"
+               # 目录名必须走与 cert_ensure 相同的清洗规则（通配符 *.a.com -> a.com），
+               # 否则菜单路径会建出带 * 的目录，与协议安装时的证书目录对不上。
+               if cert_acme "$d" "$OC_CERT_DIR/$(_cert_dir_name "$d")"; then
+                   oc_ok "证书就绪：$OC_CERT_DIR/$(_cert_dir_name "$d")"
                else
                    oc_err "ACME 失败（80 端口被占或验证不通过）"
                fi
@@ -286,9 +318,24 @@ _bk_backup() {
 }
 
 _bk_restore() {
-    local f
+    local f bad
     f="$(oc_ask "备份文件路径" "")"
     [[ -f "$f" ]] || { oc_err "文件不存在"; return 1; }
+    # 解压目标是 /，而 GNU tar 不会拦 ../ 之类的成员名：先列出成员逐个校验，
+    # 只允许 etc/oneclick 下的内容，避免恶意/损坏的备份写到任意路径。
+    if ! bad="$(tar -tzf "$f" 2>/dev/null | awk '
+        /^\// { print; next }                        # 绝对路径
+        /(^|\/)\.\.(\/|$)/ { print; next }           # 路径穿越
+        $0 !~ /^etc\/oneclick(\/|$)/ { print; next }  # 越界内容
+    ' | head -5)"; then
+        oc_err "备份包无法读取（不是有效 tar.gz？）"
+        return 1
+    fi
+    if [[ -n "$bad" ]]; then
+        oc_err "备份包含有非法或越界的成员，已拒绝解压："
+        printf '  %s\n' $bad >&2
+        return 1
+    fi
     oc_confirm "恢复会覆盖 /etc/oneclick，继续？" n || return 0
     tar -xzf "$f" -C / || { oc_err "解压失败"; return 1; }
     db_init
@@ -376,8 +423,13 @@ oc_self_update() {
     command -v curl >/dev/null 2>&1 || return 0
     tmp="$(mktemp 2>/dev/null)" || return 0
     urls=("$url")
-    local m; m="$(dl_mirror_url "$url")"
-    [[ -n "$m" && "$m" != "$url" ]] && urls+=("$m")
+    # 自更新下载的是要 exec 成 root 的 shell 脚本，默认只认官方直连。
+    # 用户为装内核设的 gh_proxy 不应把 root 代码执行权交给第三方镜像——
+    # 需要走镜像时显式设 OC_UPDATE_MIRROR=1。
+    if [[ "${OC_UPDATE_MIRROR:-0}" == "1" ]]; then
+        local m; m="$(dl_mirror_url "$url")"
+        [[ -n "$m" && "$m" != "$url" ]] && urls+=("$m")
+    fi
     local ok=0
     for src in "${urls[@]}"; do
         if curl -fsSL --connect-timeout 3 --max-time 8 -o "$tmp" "$src" 2>/dev/null; then
@@ -589,7 +641,11 @@ main() {
     db_init
     if [[ -n "$OC_CLI_ACTION" ]]; then
         cli_run
-        return $?
+        local rc=$?
+        # CLI 首跑（如 curl ... --install x --yes）也要装命令入口，
+        # 否则 README 承诺的 "first run installs itself" 在非交互路径不成立
+        oc_self_install
+        return $rc
     fi
     oc_self_install
     main_menu

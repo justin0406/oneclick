@@ -9,6 +9,14 @@
 
 umask 077
 
+# 本脚本用到了 bash 4+ 的特性（declare -gA 关联数组、${var,,} 大小写转换），
+# 在 bash 3.2（macOS 自带）上会以难懂的 unbound variable 崩掉，这里提前给明确提示。
+if (( BASH_VERSINFO[0] < 4 )); then
+    printf '[✗] 需要 bash 4.0 或更高版本（当前 %s）。\n' "${BASH_VERSION:-未知}" >&2
+    printf '    Debian/Ubuntu 上请用 bash 运行本脚本；CentOS 7 需先安装 bash5。\n' >&2
+    exit 1
+fi
+
 OC_VERSION="0.2.9"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"

@@ -9,6 +9,14 @@
 
 umask 077
 
+# 本脚本用到了 bash 4+ 的特性（declare -gA 关联数组、${var,,} 大小写转换），
+# 在 bash 3.2（macOS 自带）上会以难懂的 unbound variable 崩掉，这里提前给明确提示。
+if (( BASH_VERSINFO[0] < 4 )); then
+    printf '[✗] 需要 bash 4.0 或更高版本（当前 %s）。\n' "${BASH_VERSION:-未知}" >&2
+    printf '    Debian/Ubuntu 上请用 bash 运行本脚本；CentOS 7 需先安装 bash5。\n' >&2
+    exit 1
+fi
+
 OC_VERSION="0.2.9"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
@@ -654,7 +662,8 @@ dl_latest_ver() {
     printf '%s' "${t#v}"
 }
 
-# dl_gh <owner/repo> <tag|latest> <asset> <out>
+# dl_gh <owner/repo> <tag|latest> <asset> <out> —— 便捷封装，不做校验。
+# 注意：安装内核不要用它，改用 dl_verify_fetch（会校验上游 sidecar 或静态哈希表）。
 dl_gh() {
     local repo="$1" tag="$2" asset="$3" out="$4"
     if [[ "$tag" == "latest" ]]; then
@@ -664,7 +673,7 @@ dl_gh() {
     dl_fetch "https://github.com/$repo/releases/download/$tag/$asset" "$out"
 }
 
-# 解压 zip：dl_unzip <zip> <destdir>
+# dl_unzip <zip> <destdir>
 dl_unzip() {
     local zip="$1" dest="$2"
     mkdir -p "$dest"
@@ -679,6 +688,138 @@ dl_untar() {
     local tar="$1" dest="$2"
     mkdir -p "$dest"
     tar -xf "$tar" -C "$dest"
+}
+
+# ===========================================================================
+# 上游校验文件（sidecar）解析
+# ===========================================================================
+#
+# 各上游发布的校验文件格式互不相同，统一在这里归一化成纯 sha256 十六进制串：
+#   Xray     <asset>.dgst  ->  "SHA2-256= <hex>"
+#   Hysteria "hashes.txt"  ->  "<hex>  build/<asset>"
+#   ss-rust  <asset>.sha256->  "<hex>  <asset>"
+# 取不到校验文件时输出空串（调用方据此决定是否降级为结构校验）。
+
+# _dl_sha_from_dgst <file> —— 从 Xray 的 .dgst 里取 SHA2-256
+_dl_sha_from_dgst() {
+    sed -n 's/^SHA2-256=[[:space:]]*\([0-9a-fA-F]\{64\}\).*/\1/p' "$1" 2>/dev/null | head -n1
+}
+
+# _dl_sha_from_hashlist <file> <asset-basename> —— 从 "hex  path" 清单里取该资产的哈希
+_dl_sha_from_hashlist() {
+    local f="$1" base="$2" h p
+    while read -r h p; do
+        [[ "$h" =~ ^[0-9a-fA-F]{64}$ ]] || continue
+        # 清单里的路径可能带 build/ 前缀，按 basename 比对
+        [[ "${p##*/}" == "$base" ]] || continue
+        printf '%s' "$h"
+        return 0
+    done < "$f"
+    return 1
+}
+
+# dl_sidecar_sha <asset-url> <asset-name> <style> <workdir>
+#   style: dgst | hashlist | plain
+#   成功输出小写 sha256；取不到或解析失败输出空串（不视为错误）
+dl_sidecar_sha() {
+    local url="$1" asset="$2" style="$3" dir="$4"
+    local tmp sha="" try
+    tmp="$dir/.sidecar.$$"
+    case "$style" in
+        dgst)
+            if dl_fetch "$url.dgst" "$tmp" >/dev/null 2>&1; then
+                sha="$(_dl_sha_from_dgst "$tmp")"
+            fi
+            ;;
+        hashlist)
+            # hysteria 的清单是整个 release 共用一个 hashes.txt
+            if dl_fetch "${url%/*}/hashes.txt" "$tmp" >/dev/null 2>&1; then
+                sha="$(_dl_sha_from_hashlist "$tmp" "$asset")"
+            fi
+            ;;
+        plain)
+            if dl_fetch "$url.sha256" "$tmp" >/dev/null 2>&1; then
+                sha="$(_dl_sha_from_hashlist "$tmp" "$asset")"
+                # 有些项目只写裸哈希一行
+                [[ -z "$sha" ]] && sha="$(sed -n 's/^\([0-9a-fA-F]\{64\}\)$/\1/p' "$tmp" | head -n1)"
+            fi
+            ;;
+    esac
+    rm -f -- "$tmp" 2>/dev/null || true
+    printf '%s' "${sha,,}"
+}
+
+# dl_verify_fetch <url> <out> <style> <asset-name>
+#   下载资产并尝试用上游 sidecar 校验；拿不到 sidecar 时只做结构校验。
+#   style: dgst | hashlist | plain（有上游校验文件）| none（该上游不发布校验文件）
+dl_verify_fetch() {
+    local url="$1" out="$2" style="$3" asset="$4" dir sha
+    dir="$(dirname -- "$out")"
+    mkdir -p "$dir" 2>/dev/null || true
+    if ! dl_fetch "$url" "$out"; then
+        return 1
+    fi
+    if [[ "$style" == "none" ]]; then
+        # 压缩包与裸二进制都要能过：按魔数判断，挡掉镜像返回的 HTML 错误页
+        if ! _dl_check_archive "$out"; then
+            oc_err "下载内容不是有效的压缩包/二进制（可能是镜像返回了错误页）：$(basename "$out")"
+            rm -f -- "$out"
+            return 1
+        fi
+        return 0
+    fi
+    sha="$(dl_sidecar_sha "$url" "$asset" "$style" "$dir")"
+    if [[ -z "$sha" ]]; then
+        oc_warn "取不到上游校验文件，仅做结构校验：$(basename "$out")"
+        if ! _dl_check_archive "$out"; then
+            oc_err "下载内容不是有效的压缩包/二进制：$(basename "$out")"
+            rm -f -- "$out"
+            return 1
+        fi
+        return 0
+    fi
+    if ! dl_verify_sha "$out" "$sha"; then
+        rm -f -- "$out"
+        return 1
+    fi
+    oc_ok "SHA256 校验通过：$(basename "$out")"
+}
+
+# dl_verify_sha <file> <expected-hex>；expected 为空表示无期望值，直接通过（调用方已做结构校验）
+dl_verify_sha() {
+    local f="$1" hex="$2" got
+    [[ -n "$hex" ]] || return 0
+    got="$( (sha256sum "$f" 2>/dev/null || shasum -a 256 "$f" 2>/dev/null) | awk '{print $1}')"
+    if [[ "${got,,}" != "${hex,,}" ]]; then
+        oc_err "SHA256 校验失败：$(basename "$f")"
+        oc_err "  期望 ${hex,,}"
+        oc_err "  实际 ${got,,}"
+        return 1
+    fi
+    return 0
+}
+
+# _dl_check_elf <file> —— 只适用于裸二进制资产
+_dl_check_elf() {
+    local f="$1" magic
+    [[ -f "$f" && -s "$f" ]] || return 1
+    magic="$(od -An -tx1 -N4 "$f" 2>/dev/null | tr -d ' \n')"
+    [[ "$magic" == "7f454c46" ]]
+}
+
+# _dl_check_archive <file> —— 压缩包资产的结构校验：按魔数确认是 zip / gzip / xz，
+# 挡住镜像返回的 HTML 错误页。裸 ELF 也放行（部分上游直接发未压缩二进制）。
+_dl_check_archive() {
+    local f="$1" magic
+    [[ -f "$f" && -s "$f" ]] || return 1
+    magic="$(od -An -tx1 -N6 "$f" 2>/dev/null | tr -d ' \n')"
+    case "$magic" in
+        504b0304*)          return 0 ;;  # zip: PK\x03\x04
+        1f8b*)              return 0 ;;  # gzip
+        fd377a585a00)       return 0 ;;  # xz
+        7f454c46*)          return 0 ;;  # ELF（未压缩二进制）
+        *)                  return 1 ;;
+    esac
 }
 
 # ===== src/lib/net.sh =====
@@ -1822,82 +1963,11 @@ share_print_info() {
     done
 }
 
-# share_print_links <key> —— URI + 三种订阅片段 + 二维码
-share_print_links() {
-    local key="${1:-}" fn uri out
-    if [[ -z "$key" ]]; then
-        oc_err "用法：share_print_links <key>"
-        return 1
-    fi
-    if ! db_is_installed "$key"; then
-        oc_err "协议未安装：$key"
-        return 1
-    fi
-    oc_title "配置信息：${OC_PROTO_TITLE[$key]:-$key}"
-
-    fn="$(_share_fn "$key" link)"
-    if ! uri="$("$fn")"; then
-        oc_err "分享链接生成失败"
-        return 1
-    fi
-    oc_info "URI 链接："
-    printf '%s\n' "$uri"
-    printf '\n'
-
-    fn="$(_share_fn "$key" clash)"
-    oc_info "Clash 片段（proxies: 下的一项）："
-    if ! out="$("$fn")"; then
-        oc_warn "Clash 片段生成失败"
-    else
-        printf '%s\n' "$out"
-    fi
-    printf '\n'
-
-    fn="$(_share_fn "$key" surge)"
-    oc_info "Surge 节点行："
-    if ! out="$("$fn")"; then
-        oc_warn "Surge 节点生成失败"
-    else
-        printf '%s\n' "$out"
-    fi
-    printf '\n'
-
-    if [[ "$key" != "snell" ]]; then
-        fn="$(_share_fn "$key" loon)"
-        oc_info "Loon 节点行："
-        if ! out="$("$fn")"; then
-            oc_warn "Loon 节点生成失败"
-        else
-            printf '%s\n' "$out"
-        fi
-        printf '\n'
-    fi
-
-    oc_info "扫码导入（v2rayN / NekoBox / Shadowrocket）："
-    share_qr "$uri"
-}
 
 # ===== src/proto/vless_reality.sh =====
 # proto/vless_reality.sh —— VLESS + REALITY（Xray-core 官方内核）
 # REALITY 不落地证书：借用目标站真实 TLS 握手，不需要证书库参与；
 # 私钥只存在于 /etc/oneclick/db.json 与 config.json，两者都是 600，不允许只留在内存。
-
-# 交互读取：ui.sh 的 oc_ask 把提示符也写进 stdout，$(oc_ask ...) 捕获后不可用，
-# 所以这里提示走 stderr，答案走 stdout（等 ui.sh 修好后可直接换回 oc_ask）。
-ocp_vless_reality_ask() {
-    local prompt="$1" def="${2:-}" ans
-    if [[ "$OC_YES" == "1" && -n "$def" ]]; then
-        printf '%s' "$def"
-        return 0
-    fi
-    if [[ -n "$def" ]]; then
-        printf '%s [%s]: ' "$prompt" "$def" >&2
-    else
-        printf '%s: ' "$prompt" >&2
-    fi
-    read -r ans || ans=""
-    printf '%s' "${ans:-$def}"
-}
 
 # 输出两行：私钥、公钥。优先走 cert.sh 的 reality_keypair，失败再自己解析 xray x25519。
 ocp_vless_reality_keys() {
@@ -1967,7 +2037,7 @@ ocp_vless_reality_port() {
 ocp_vless_reality_dest() {
     local def="${OC_ARG_SNI:-www.microsoft.com}" input sni dest
     oc_warn "提示：dest 必须是未过 CDN 的真实站点，套了 CDN 会破坏 REALITY 的 TLS 指纹"
-    input="$(ocp_vless_reality_ask "REALITY 伪装域名（回车用默认，真实域名不能过 CDN）" "$def")"
+    input="$(oc_ask "REALITY 伪装域名（回车用默认，真实域名不能过 CDN）" "$def")"
     input="$(printf '%s' "$input" | tr -d '[:space:]')"
     [[ -z "$input" ]] && input="$def"
     if [[ "$input" == *:* ]]; then
@@ -2102,9 +2172,11 @@ proto_vless_reality_install() {
         [[ -z "$ver" ]] && oc_die "获取 Xray-core 版本失败（网络或 GitHub API 限流），可先在设置里配 gh_proxy"
         oc_info "下载 Xray-core $ver（$asset）..."
         tmp="$(mktemp -d "${TMPDIR:-/tmp}/oneclick-xray.XXXXXX")" || oc_die "创建临时目录失败"
-        if ! dl_gh XTLS/Xray-core "$ver" "$asset" "$tmp/xray.zip"; then
+        # Xray 每个资产都有同名 .dgst（内含 SHA2-256），下载即校验
+        if ! dl_verify_fetch "https://github.com/XTLS/Xray-core/releases/download/$ver/$asset" \
+                "$tmp/xray.zip" dgst "$asset"; then
             rm -rf "$tmp"
-            oc_die "Xray-core 下载失败"
+            oc_die "Xray-core 下载或校验失败"
         fi
         if ! dl_unzip "$tmp/xray.zip" "$tmp/unzip"; then
             rm -rf "$tmp"
@@ -2167,8 +2239,6 @@ proto_vless_reality_install() {
         oc_die "安装中止（配置保留在 $cfg）"
     fi
     oc_ok "服务已启动：$unit"
-
-    # 先按 comment 删旧规则再放行，重装/重跑不会叠加
 
     db_set "$key" port "$port"
     db_set "$key" server_name "$sni"
@@ -2364,25 +2434,6 @@ proto_vless_reality_clash() {
     printf '    client-fingerprint: chrome\n'
 }
 
-proto_vless_reality_surge() {
-    local key="vless_reality" ip port uuid sni sid pub name
-    if ! db_has "$key"; then
-        oc_err "VLESS-Reality 未安装"
-        return 1
-    fi
-    ip="$(ocp_vless_reality_ip)"
-    port="$(db_get "$key" port "")"
-    uuid="$(db_get "$key" uuid "")"
-    sni="$(db_get "$key" server_name "www.microsoft.com")"
-    sid="$(db_get "$key" short_id "")"
-    pub="$(db_get "$key" public_key "")"
-    name="${OC_PROTO_TITLE[$key]:-VLESS-Reality}"
-    [[ -z "$ip" ]] && return 1
-    # Surge 的 VLESS 行：username 即 uuid；REALITY 用 reality=true + public-key/short-id
-    printf '%s = vless, %s, %s, username=%s, tls=true, sni=%s, reality=true, public-key=%s, short-id=%s, flow=xtls-rprx-vision, skip-cert-verify=true\n' \
-        "$name" "$ip" "$port" "$uuid" "$sni" "$pub" "$sid"
-}
-
 proto_vless_reality_singbox() {
     local key="vless_reality" ip port uuid sni sid pub name
     if ! db_has "$key"; then
@@ -2493,12 +2544,9 @@ ocp_hy2_arch() {
     esac
 }
 
-# 下载结果必须是 ELF（镜像/代理常返回 HTML 错误页）
+# 下载结果必须是有效二进制（镜像/代理常返回 HTML 错误页）——复用 dl.sh 的统一结构校验
 ocp_hy2_check_elf() {
-    local f="${1:-}" magic
-    [[ -f "$f" ]] || return 1
-    magic="$(od -An -tx1 -N4 "$f" 2>/dev/null | tr -d ' \n')"
-    [[ "$magic" == "7f454c46" ]]
+    _dl_check_elf "${1:-}"
 }
 
 ocp_hy2_yaml_escape() {
@@ -2508,18 +2556,20 @@ ocp_hy2_yaml_escape() {
     printf '%s' "$s"
 }
 
-# 取 latest 失败时让用户手输版本标签（dl_gh 的 latest 依赖 GitHub API）
+# 取 latest 失败时让用户手输版本标签（GitHub API 可能限流）
 ocp_hy2_fetch_bin() {
-    local out="${1:-}" arch asset tag
+    local out="${1:-}" arch asset tag url
     arch="$(ocp_hy2_arch)" || return 1
     asset="hysteria-linux-${arch}"
-    if dl_gh apernet/hysteria latest "$asset" "$out"; then
-        return 0
+    tag="$(dl_latest_tag apernet/hysteria)"
+    if [[ -z "$tag" ]]; then
+        oc_warn "直接从 GitHub 获取最新版失败（网络或 API 受限）"
+        tag="$(oc_ask "请手动输入 Hysteria 版本标签（例如 app/v2.13.0）" "app/v2.13.0")"
+        [[ -n "$tag" ]] || return 1
     fi
-    oc_warn "直接从 GitHub 获取最新版失败（网络或 API 受限）"
-    tag="$(oc_ask "请手动输入 Hysteria 版本标签（例如 app/v2.13.0）" "app/v2.13.0")"
-    [[ -n "$tag" ]] || return 1
-    dl_fetch "https://github.com/apernet/hysteria/releases/download/${tag}/${asset}" "$out"
+    url="https://github.com/apernet/hysteria/releases/download/${tag}/${asset}"
+    # 整个 release 共用一份 hashes.txt，按资产 basename 匹配
+    dl_verify_fetch "$url" "$out" hashlist "$asset"
 }
 
 # 写服务端 YAML（/etc/oneclick/hysteria2/config.yaml，600）；内容无变化时不重写
@@ -2581,14 +2631,25 @@ ocp_hy2_write_unit() {
         "OneClick Hysteria2"
 }
 
-# 对外 IP：优先 db 里缓存的 settings.ip，避免每次外联探测
+# 对外 IP：优先 db 里缓存的 settings.ip，避免每次外联探测。
+# 探测失败返回空串，由调用方报错——绝不能兜底成 0.0.0.0 静默产出坏节点。
 ocp_hy2_ip() {
     local ip
     ip="$(db_setting ip)"
     if [[ -z "$ip" ]]; then
         ip="$(net_primary_ip)"
     fi
-    printf '%s' "${ip:-0.0.0.0}"
+    printf '%s' "$ip"
+}
+
+# 主机名片段：取不到 IP 返回 1（调用方据此报错，不产出坏节点）；
+# IPv6 必须加方括号才能拼进 URI/Surge/Loon 行。
+ocp_hy2_host() {
+    local ip
+    ip="$(ocp_hy2_ip)"
+    [[ -z "$ip" ]] && return 1
+    [[ "$ip" == *:* ]] && ip="[${ip}]"
+    printf '%s' "$ip"
 }
 
 # 自签证书才跳过校验；acme/existing 为真实证书
@@ -2830,7 +2891,7 @@ proto_hysteria2_status() {
 }
 
 proto_hysteria2_link() {
-    local pw port sni mode obfs obfs_pw hop ip host q
+    local pw port sni mode obfs obfs_pw hop host q
     pw="$(db_get hysteria2 password "")"
     port="$(db_get hysteria2 port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
@@ -2839,9 +2900,7 @@ proto_hysteria2_link() {
     obfs="$(db_get hysteria2 obfs off)"
     obfs_pw="$(db_get hysteria2 obfs_password "")"
     hop="$(db_get hysteria2 hop "")"
-    ip="$(ocp_hy2_ip)"
-    host="$ip"
-    [[ "$ip" == *:* ]] && host="[${ip}]"
+    host="$(ocp_hy2_host)" || return 1
     q="sni=${sni}"
     if [[ "$mode" == "self" ]]; then
         q+="&insecure=1"
@@ -2902,7 +2961,7 @@ proto_hysteria2_clash() {
     obfs="$(db_get hysteria2 obfs off)"
     obfs_pw="$(db_get hysteria2 obfs_password "")"
     hop="$(db_get hysteria2 hop "")"
-    ip="$(ocp_hy2_ip)"
+    ip="$(ocp_hy2_host)" || return 1
 
     printf '  - name: "%s"\n' "$(ocp_hy2_name)"
     printf '    type: hysteria2\n'
@@ -2923,13 +2982,14 @@ proto_hysteria2_clash() {
 }
 
 proto_hysteria2_surge() {
-    local pw port sni hop line
+    local pw port sni hop line host
     pw="$(db_get hysteria2 password "")"
     port="$(db_get hysteria2 port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get hysteria2 sni bing.com)"
     hop="$(db_get hysteria2 hop "")"
-    line="$(ocp_hy2_name) = hysteria2, $(ocp_hy2_ip), ${port}, password=${pw}, sni=${sni}"
+    host="$(ocp_hy2_host)" || return 1
+    line="$(ocp_hy2_name) = hysteria2, ${host}, ${port}, password=${pw}, sni=${sni}"
     # Surge 手册 policies/hysteria2.html：port-hopping 用分号分隔，设置后忽略主端口
     if [[ -n "$hop" ]]; then
         line+=", port-hopping=${hop}"
@@ -2941,7 +3001,7 @@ proto_hysteria2_surge() {
 }
 
 proto_hysteria2_singbox() {
-    local pw port sni obfs obfs_pw hop hop_ports ins
+    local pw port sni obfs obfs_pw hop hop_ports ins host name
     pw="$(db_get hysteria2 password "")"
     port="$(db_get hysteria2 port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
@@ -2950,18 +3010,21 @@ proto_hysteria2_singbox() {
     obfs_pw="$(db_get hysteria2 obfs_password "")"
     hop="$(db_get hysteria2 hop "")"
     ins="$(ocp_hy2_insecure)"
+    host="$(ocp_hy2_host)" || return 1
+    # tag 与 Clash/Surge/Loon 侧节点名保持一致，selector 里更好认
+    name="$(ocp_hy2_name)"
     hop_ports=""
     if [[ -n "$hop" ]]; then
         hop_ports="${hop/-/:}"
     fi
 
     jq -n \
-        --argjson port "$port" --arg server "$(ocp_hy2_ip)" --arg pw "$pw" \
+        --argjson port "$port" --arg server "$host" --arg pw "$pw" --arg tag "$name" \
         --arg sni "$sni" --argjson insecure "$ins" \
         --arg obfs "$obfs" --arg obfs_pw "$obfs_pw" --arg hop_ports "$hop_ports" '
         {
             type: "hysteria2",
-            tag: "oneclick-hysteria2",
+            tag: $tag,
             server: $server,
             server_port: $port,
             password: $pw
@@ -2978,7 +3041,7 @@ proto_hysteria2_singbox() {
 # Loon 片段：Hysteria2 在 Loon 里类型名是大写 Hysteria2，SNI 参数叫 tls-name，
 # 端口跳跃用 server-ports（Loon 的 hop 参数，见 Sub-Store 的 loon producer）。
 proto_hysteria2_loon() {
-    local pw port sni hop obfs obfs_pw line
+    local pw port sni hop obfs obfs_pw line host
     pw="$(db_get hysteria2 password "")"
     port="$(db_get hysteria2 port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
@@ -2986,7 +3049,8 @@ proto_hysteria2_loon() {
     hop="$(db_get hysteria2 hop "")"
     obfs="$(db_get hysteria2 obfs off)"
     obfs_pw="$(db_get hysteria2 obfs_password "")"
-    line="$(oc_loon_name hysteria2) = Hysteria2,$(ocp_hy2_ip),${port},\"${pw}\""
+    host="$(ocp_hy2_host)" || return 1
+    line="$(oc_loon_name hysteria2) = Hysteria2,${host},${port},\"${pw}\""
     [[ -n "$hop" ]] && line+=",server-ports=\"${hop}\""
     line+=",sni=${sni}"
     [[ "$(ocp_hy2_insecure)" == "1" ]] && line+=",skip-cert-verify=true"
@@ -3019,6 +3083,14 @@ proto_hysteria2_loon() {
 
 # 固定版本（升级只改这一处；同时用于下载 URL 与 db.version）
 OC_SNELL_VER="${OC_SNELL_VER:-6.0.0}"
+
+# 钉死版本的资产 SHA256（dl.nssurge.com 不提供校验文件，故在代码内固定）。
+# 升级 OC_SNELL_VER 时必须同步更新本表，否则会退回结构校验。
+declare -gA OC_SNELL_SHA256=(
+    [snell-server-v6.0.0-linux-amd64.zip]=8a9c4463ca87cfa5eaa37c6af0d37ab93ea275aa12391985bb2a375ca3abd7f2
+    [snell-server-v6.0.0-linux-aarch64.zip]=a0b2915cbc77dc3baf8fa069e741c20808d8a10c3a8a93e709a0a580645c3bd7
+    [snell-server-v6.0.0-linux-i386.zip]=67060ef79ac4ef0bb64c520302396620b3a06f8f6d5ceb450be283e4fa749335
+)
 
 # ---------- 内部辅助 ----------
 
@@ -3227,9 +3299,13 @@ proto_snell_install() {
         url="https://dl.nssurge.com/snell/${asset}"
         tmp="$(mktemp -d "${TMPDIR:-/tmp}/oneclick-snell.XXXXXX")" || oc_die "创建临时目录失败"
         oc_info "下载 Snell v${OC_SNELL_VER}（linux-${arch}）..."
-        if ! dl_fetch "$url" "$tmp/snell.zip"; then
+        if ! dl_verify_fetch "$url" "$tmp/snell.zip" none "$asset"; then
             rm -rf -- "$tmp"
             oc_die "Snell 下载失败（dl.nssurge.com 可能限流或不可达）；可稍后重试或手动放到 $bin"
+        fi
+        if ! dl_verify_sha "$tmp/snell.zip" "${OC_SNELL_SHA256[$asset]:-}"; then
+            rm -rf -- "$tmp"
+            oc_die "Snell 校验失败（版本 v${OC_SNELL_VER} 的资产哈希与代码内记录不符）"
         fi
         if ! dl_unzip "$tmp/snell.zip" "$tmp/x"; then
             rm -rf -- "$tmp"
@@ -3311,7 +3387,7 @@ proto_snell_uninstall() {
         return 0
     fi
     if [[ "${OC_YES:-0}" != "1" ]]; then
-        oc_confirm "确认卸载 Snell v6（停止服务、删除配置与防火墙规则）？" n || {
+        oc_confirm "确认卸载 Snell v6（停止服务并删除配置）？" n || {
             oc_info "已取消"
             return 0
         }
@@ -3325,11 +3401,11 @@ proto_snell_uninstall() {
 
     svc_remove "$unit"
     oc_ok "已停止并移除服务：$unit"
-    # 默认一并删除；但若用户原有的 snell-server.service（或其他面板）还引用同一路径，
-    # 删掉会让别人的服务重启后起不来，此时保留并说明。
+    # 默认保留二进制：它可能被面板/其它脚本复用，删错代价高；
+    # 需要清理时在交互里选 y，或用 --purge 走彻底卸载。
     if svc_bin_referenced "$bin"; then
         oc_warn "检测到其他 systemd 服务仍引用 $bin（可能是你原有的 Snell 服务），保留不删"
-    elif oc_confirm "同时删除 snell-server 二进制 $bin ？" y; then
+    elif oc_confirm "同时删除 snell-server 二进制 $bin ？" n; then
         rm -f -- "$bin" && oc_ok "已删除 $bin"
     fi
     if [[ -n "$dir" && "$dir" == "${OC_ROOT}/"* && -d "$dir" ]]; then
@@ -3533,6 +3609,8 @@ proto_snell_loon() {
 
 # 下载版本；OC_SSRUST_VER 为空表示取 GitHub 最新，取不到再用下面的已知版本兜底
 OC_SSRUST_VER="${OC_SSRUST_VER:-}"
+# ShadowTLS 版本；同样为空表示取最新，失败用兜底版本
+OC_SSRUST_STLS_VER="${OC_SSRUST_STLS_VER:-}"
 OC_SSRUST_FALLBACK_VER="1.25.0"
 OC_SSRUST_STLS_FALLBACK_VER="0.2.25"
 
@@ -3910,9 +3988,10 @@ ocp_ssrust_fetch_ss() {
         return 1
     }
     oc_info "下载 Shadowsocks-Rust v${ver}（${arch}）..."
-    if ! dl_fetch "$url" "$tmp/ss.tar.xz"; then
+    # 每个资产都有同名 .sha256（内容 "<hex>  <asset>"）
+    if ! dl_verify_fetch "$url" "$tmp/ss.tar.xz" plain "$asset"; then
         rm -rf -- "$tmp"
-        oc_err "Shadowsocks-Rust 下载失败（GitHub 可能不可达）"
+        oc_err "Shadowsocks-Rust 下载或校验失败（GitHub 可能不可达）"
         return 1
     fi
     if ! dl_untar "$tmp/ss.tar.xz" "$tmp/x"; then
@@ -3952,9 +4031,10 @@ ocp_ssrust_fetch_stls() {
         return 1
     }
     oc_info "下载 ShadowTLS v${ver}（${tar_arch}）..."
-    if ! dl_fetch "$url" "$tmp/shadow-tls"; then
+    # shadow-tls 的 release 不提供校验文件，只能做结构校验（ELF 魔数）
+    if ! dl_verify_fetch "$url" "$tmp/shadow-tls" none "$asset"; then
         rm -rf -- "$tmp"
-        oc_err "ShadowTLS 下载失败（GitHub 可能不可达）"
+        oc_err "ShadowTLS 下载失败（GitHub 可能不可达，或镜像返回了错误页）"
         return 1
     fi
     if ! install -m 755 "$tmp/shadow-tls" "$bin"; then
@@ -4220,10 +4300,10 @@ proto_ss_rust_uninstall() {
     svc_remove "$stl_unit"
     svc_remove "$unit"
     oc_ok "已停止并移除服务：${unit} ${stl_unit}"
-    # 两个二进制都只服务本协议，默认删除（OC_YES=1 按默认 yes 删，避免留孤儿）
+    # 默认保留二进制（可能被面板复用）；需要清理时交互里选 y，或走 --purge。
     if svc_bin_referenced "$(ocp_ssrust_bin)" || svc_bin_referenced "$(ocp_ssrust_stls_bin)"; then
         oc_warn "检测到其他 systemd 服务仍在引用 ssserver/shadow-tls，保留不删"
-    elif oc_confirm "同时删除 ssserver 与 shadow-tls 二进制？" y; then
+    elif oc_confirm "同时删除 ssserver 与 shadow-tls 二进制？" n; then
         rm -f -- "$(ocp_ssrust_bin)" && oc_ok "已删除 $(ocp_ssrust_bin)"
         rm -f -- "$(ocp_ssrust_stls_bin)" && oc_ok "已删除 $(ocp_ssrust_stls_bin)"
     fi
@@ -4569,6 +4649,14 @@ proto_ss_rust_loon() {
 # sing-box 版本钉死（升级只改这一处；已装同版本时复用二进制，不重复下载）
 OC_SINGBOX_VER="${OC_SINGBOX_VER:-1.14.4}"
 
+# 钉死版本的资产 SHA256（官方 release 不发布校验文件，故在代码内固定）。
+# 升级 OC_SINGBOX_VER 时必须同步更新本表，否则会退回结构校验。
+declare -gA OC_SINGBOX_SHA256=(
+    [sing-box-1.14.4-linux-amd64.tar.gz]=699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968
+    [sing-box-1.14.4-linux-arm64.tar.gz]=436441f76ee2f7fe21b5b2d426d3cb261a480455a704865789ad533e4273ec26
+    [sing-box-1.14.4-linux-armv7.tar.gz]=fd164ed45ebc784f657a3e1d0e0ad0f68afdcff864ee57122c2cfed3ddb80a00
+)
+
 # ---------- 内部辅助 ----------
 
 ocp_anytls_dir() {
@@ -4625,7 +4713,16 @@ ocp_anytls_fetch_singbox() {
     arch="$(ocp_anytls_arch)" || return 1
     asset="sing-box-${ver}-linux-${arch}.tar.gz"
     tmpdir="$(mktemp -d)" || return 1
-    if ! dl_gh SagerNet/sing-box "v${ver}" "$asset" "$tmpdir/sing-box.tar.gz"; then
+    # sing-box 的 release 不发布校验文件；版本是钉死的，所以用代码内静态表兜底，
+    # 表里有值就强校验，没有（例如用户自定义 OC_SINGBOX_VER）退回结构校验。
+    if ! dl_verify_fetch "https://github.com/SagerNet/sing-box/releases/download/v${ver}/${asset}" \
+            "$tmpdir/sing-box.tar.gz" none "$asset"; then
+        rm -rf -- "$tmpdir"
+        return 1
+    fi
+    local known_sha
+    known_sha="${OC_SINGBOX_SHA256[$asset]:-}"
+    if [[ -n "$known_sha" ]] && ! dl_verify_sha "$tmpdir/sing-box.tar.gz" "$known_sha"; then
         rm -rf -- "$tmpdir"
         return 1
     fi
@@ -4716,14 +4813,25 @@ ocp_anytls_check_config() {
     fi
 }
 
-# 对外 IP：优先 db 里缓存的 settings.ip，避免每次外联探测
+# 对外 IP：优先 db 里缓存的 settings.ip，避免每次外联探测。
+# 探测失败返回空串，由调用方报错——绝不能兜底成 0.0.0.0 静默产出坏节点。
 ocp_anytls_ip() {
     local ip
     ip="$(db_setting ip)"
     if [[ -z "$ip" ]]; then
         ip="$(net_primary_ip)"
     fi
-    printf '%s' "${ip:-0.0.0.0}"
+    printf '%s' "$ip"
+}
+
+# 主机名片段：取不到 IP 返回 1（调用方据此报错，不产出坏节点）；
+# IPv6 必须加方括号才能拼进 URI/Surge/Loon 行。
+ocp_anytls_host() {
+    local ip
+    ip="$(ocp_anytls_ip)"
+    [[ -z "$ip" ]] && return 1
+    [[ "$ip" == *:* ]] && ip="[${ip}]"
+    printf '%s' "$ip"
 }
 
 # 自签证书才跳过校验；acme/existing 为真实证书
@@ -4882,7 +4990,7 @@ proto_anytls_uninstall() {
         oc_warn "AnyTLS 未安装"
         return 0
     fi
-    oc_confirm "确认卸载 AnyTLS（停止服务、删除配置与防火墙规则）？" y || {
+    oc_confirm "确认卸载 AnyTLS（停止服务并删除配置）？" y || {
         oc_info "已取消"
         return 0
     }
@@ -4918,14 +5026,12 @@ proto_anytls_status() {
 }
 
 proto_anytls_link() {
-    local pw port sni ip host q
+    local pw port sni host q
     pw="$(db_get anytls password "")"
     port="$(db_get anytls port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
-    ip="$(ocp_anytls_ip)"
-    host="$ip"
-    [[ "$ip" == *:* ]] && host="[${ip}]"
+    host="$(ocp_anytls_host)" || return 1
     q="sni=${sni}"
     if [[ "$(ocp_anytls_insecure)" == "1" ]]; then
         q+="&insecure=1"
@@ -4973,7 +5079,7 @@ proto_anytls_clash() {
     port="$(db_get anytls port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
-    ip="$(ocp_anytls_ip)"
+    ip="$(ocp_anytls_host)" || return 1
 
     printf '  - name: "%s"\n' "$(ocp_anytls_name)"
     printf '    type: anytls\n'
@@ -4988,12 +5094,13 @@ proto_anytls_clash() {
 }
 
 proto_anytls_surge() {
-    local pw port sni line
+    local pw port sni line host
     pw="$(db_get anytls password "")"
     port="$(db_get anytls port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
-    line="$(ocp_anytls_name) = anytls, $(ocp_anytls_ip), ${port}, password=${pw}, sni=${sni}"
+    host="$(ocp_anytls_host)" || return 1
+    line="$(ocp_anytls_name) = anytls, ${host}, ${port}, password=${pw}, sni=${sni}"
     if [[ "$(ocp_anytls_insecure)" == "1" ]]; then
         line+=", skip-cert-verify=true"
     fi
@@ -5001,19 +5108,22 @@ proto_anytls_surge() {
 }
 
 proto_anytls_singbox() {
-    local pw port sni ins
+    local pw port sni ins host name
     pw="$(db_get anytls password "")"
     port="$(db_get anytls port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
     ins="$(ocp_anytls_insecure)"
+    host="$(ocp_anytls_host)" || return 1
+    # tag 与 Clash/Surge/Loon 侧节点名保持一致
+    name="$(ocp_anytls_name)"
 
     jq -n \
-        --argjson port "$port" --arg server "$(ocp_anytls_ip)" \
+        --argjson port "$port" --arg server "$host" --arg tag "$name" \
         --arg pw "$pw" --arg sni "$sni" --argjson insecure "$ins" '
         {
             type: "anytls",
-            tag: "oneclick-anytls",
+            tag: $tag,
             server: $server,
             server_port: $port,
             password: $pw,
@@ -5026,12 +5136,13 @@ proto_anytls_singbox() {
 
 # Loon 片段：AnyTLS 在 Loon 里类型名是小写 anytls，SNI 参数叫 tls-name。
 proto_anytls_loon() {
-    local pw port sni line
+    local pw port sni line host
     pw="$(db_get anytls password "")"
     port="$(db_get anytls port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
-    line="$(oc_loon_name anytls) = AnyTLS,$(ocp_anytls_ip),${port},\"${pw}\""
+    host="$(ocp_anytls_host)" || return 1
+    line="$(oc_loon_name anytls) = AnyTLS,${host},${port},\"${pw}\""
     line+=",sni=${sni}"
     [[ "$(ocp_anytls_insecure)" == "1" ]] && line+=",skip-cert-verify=true"
     line+=",udp=true"
@@ -5191,34 +5302,64 @@ _menu_change_port() {
     new="$(oc_ask "新端口（当前 $old，回车不改）" "")"
     [[ -z "$new" || "$new" == "$old" ]] && return 0
     [[ "$new" =~ ^[0-9]+$ ]] || { oc_err "端口必须是数字"; return 1; }
-    local proto="tcp"
-    [[ "$(oc_meta_field "$k" udp)" == "yes" ]] && proto="udp"
-    net_port_in_use "$new" "$proto" && { oc_err "端口 $new 已被占用"; return 1; }
+    # ss_rust / shadowtls 是 tcp+udp，meta 只能标一个；这类协议两侧都要查，
+    # 否则改完端口 ssserver 会因 TCP 侧被占而起不来。
+    local -a protos=("tcp")
+    if [[ "$(oc_meta_field "$k" udp)" == "yes" ]]; then
+        protos=(tcp udp)
+    fi
+    local p
+    for p in "${protos[@]}"; do
+        net_port_in_use "$new" "$p" && { oc_err "端口 $new/$p 已被占用"; return 1; }
+    done
     db_set "$k" port "$new"
     if oc_call "$k" regen; then
         oc_ok "端口已改为 $new"
-    else
-        db_set "$k" port "$old"
-        oc_err "重生成失败，端口回滚为 $old"
+        return 0
     fi
+    # regen 失败时磁盘配置已是新端口、服务已停：只回滚 db 会留下 db/配置漂移，
+    # 必须用旧端口再 regen 一次把配置和服务一起拉回去。
+    oc_err "重生成失败，正在回滚到 $old ..."
+    db_set "$k" port "$old"
+    if oc_call "$k" regen >/dev/null 2>&1; then
+        oc_warn "已回滚为 $old（服务恢复原状）"
+    else
+        oc_err "回滚也失败，配置可能与状态库不一致，请检查日志后用 --regen $k 重试"
+    fi
+    return 1
 }
 
 _menu_change_pw() {
-    local k="$1" field new
+    local k="$1" field old new
     case "$k" in
         snell) field="psk" ;;
         vless_reality) field="uuid" ;;
         *) field="password" ;;
     esac
+    old="$(db_get "$k" "$field" "")"
     new="$(oc_ask "新凭据（回车自动生成）" "")"
     [[ -z "$new" ]] && new="$(os_random_token 20)"
+    # VLESS 的 uuid 必须是标准 8-4-4-4-12 形式，坏值会让 regen 永远失败
+    if [[ "$field" == "uuid" ]] &&
+        [[ ! "$new" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+        oc_err "UUID 格式不合法（需 8-4-4-4-12 十六进制），已取消"
+        return 1
+    fi
     db_set "$k" "$field" "$new"
     if oc_call "$k" regen; then
         oc_ok "凭据已更新"
         oc_kv "新凭据" "$new"
-    else
-        oc_err "重生成失败，请检查日志"
+        return 0
     fi
+    # 失败必须回滚：坏凭据留在库里会让之后每次 regen 都失败
+    oc_err "重生成失败，已回滚原凭据"
+    db_set "$k" "$field" "$old"
+    if oc_call "$k" regen >/dev/null 2>&1; then
+        oc_warn "服务已用原凭据恢复"
+    else
+        oc_err "回滚后仍启动失败，请检查日志"
+    fi
+    return 1
 }
 
 _menu_delete() {
@@ -5245,8 +5386,10 @@ menu_cert() {
                d="$(oc_ask "域名" "")"
                [[ -z "$d" ]] && { oc_err "域名不能为空"; oc_pause; continue; }
                os_dep_install base acme || { oc_pause; continue; }
-               if cert_acme "$d" "$OC_CERT_DIR/$d"; then
-                   oc_ok "证书就绪：$OC_CERT_DIR/$d"
+               # 目录名必须走与 cert_ensure 相同的清洗规则（通配符 *.a.com -> a.com），
+               # 否则菜单路径会建出带 * 的目录，与协议安装时的证书目录对不上。
+               if cert_acme "$d" "$OC_CERT_DIR/$(_cert_dir_name "$d")"; then
+                   oc_ok "证书就绪：$OC_CERT_DIR/$(_cert_dir_name "$d")"
                else
                    oc_err "ACME 失败（80 端口被占或验证不通过）"
                fi
@@ -5326,9 +5469,24 @@ _bk_backup() {
 }
 
 _bk_restore() {
-    local f
+    local f bad
     f="$(oc_ask "备份文件路径" "")"
     [[ -f "$f" ]] || { oc_err "文件不存在"; return 1; }
+    # 解压目标是 /，而 GNU tar 不会拦 ../ 之类的成员名：先列出成员逐个校验，
+    # 只允许 etc/oneclick 下的内容，避免恶意/损坏的备份写到任意路径。
+    if ! bad="$(tar -tzf "$f" 2>/dev/null | awk '
+        /^\// { print; next }                        # 绝对路径
+        /(^|\/)\.\.(\/|$)/ { print; next }           # 路径穿越
+        $0 !~ /^etc\/oneclick(\/|$)/ { print; next }  # 越界内容
+    ' | head -5)"; then
+        oc_err "备份包无法读取（不是有效 tar.gz？）"
+        return 1
+    fi
+    if [[ -n "$bad" ]]; then
+        oc_err "备份包含有非法或越界的成员，已拒绝解压："
+        printf '  %s\n' $bad >&2
+        return 1
+    fi
     oc_confirm "恢复会覆盖 /etc/oneclick，继续？" n || return 0
     tar -xzf "$f" -C / || { oc_err "解压失败"; return 1; }
     db_init
@@ -5416,8 +5574,13 @@ oc_self_update() {
     command -v curl >/dev/null 2>&1 || return 0
     tmp="$(mktemp 2>/dev/null)" || return 0
     urls=("$url")
-    local m; m="$(dl_mirror_url "$url")"
-    [[ -n "$m" && "$m" != "$url" ]] && urls+=("$m")
+    # 自更新下载的是要 exec 成 root 的 shell 脚本，默认只认官方直连。
+    # 用户为装内核设的 gh_proxy 不应把 root 代码执行权交给第三方镜像——
+    # 需要走镜像时显式设 OC_UPDATE_MIRROR=1。
+    if [[ "${OC_UPDATE_MIRROR:-0}" == "1" ]]; then
+        local m; m="$(dl_mirror_url "$url")"
+        [[ -n "$m" && "$m" != "$url" ]] && urls+=("$m")
+    fi
     local ok=0
     for src in "${urls[@]}"; do
         if curl -fsSL --connect-timeout 3 --max-time 8 -o "$tmp" "$src" 2>/dev/null; then
@@ -5629,7 +5792,11 @@ main() {
     db_init
     if [[ -n "$OC_CLI_ACTION" ]]; then
         cli_run
-        return $?
+        local rc=$?
+        # CLI 首跑（如 curl ... --install x --yes）也要装命令入口，
+        # 否则 README 承诺的 "first run installs itself" 在非交互路径不成立
+        oc_self_install
+        return $rc
     fi
     oc_self_install
     main_menu

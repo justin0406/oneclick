@@ -41,7 +41,10 @@ install time and leaves them under their respective licenses:
 
 ## Disclaimer
 
-This software is provided "as is", without warranty of any kind. It configures
-firewalls, TLS certificates and system services on the host it runs on, and it
-can interrupt existing services that occupy the same ports. Use it only on
-machines you own or administer, and only where running a proxy is lawful.
+This software is provided "as is", without warranty of any kind. It installs
+system services, issues TLS certificates and configures proxy kernels on the
+host it runs on, and it can interrupt existing services that occupy the same
+ports. It does not modify firewall rules (the only exception is Hysteria2 port
+hopping, where hysteria itself manages the redirect rules for its own port
+range). Use it only on machines you own or administer, and only where running
+a proxy is lawful.

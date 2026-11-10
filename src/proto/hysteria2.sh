@@ -49,12 +49,9 @@ ocp_hy2_arch() {
     esac
 }
 
-# 下载结果必须是 ELF（镜像/代理常返回 HTML 错误页）
+# 下载结果必须是有效二进制（镜像/代理常返回 HTML 错误页）——复用 dl.sh 的统一结构校验
 ocp_hy2_check_elf() {
-    local f="${1:-}" magic
-    [[ -f "$f" ]] || return 1
-    magic="$(od -An -tx1 -N4 "$f" 2>/dev/null | tr -d ' \n')"
-    [[ "$magic" == "7f454c46" ]]
+    _dl_check_elf "${1:-}"
 }
 
 ocp_hy2_yaml_escape() {
@@ -64,18 +61,20 @@ ocp_hy2_yaml_escape() {
     printf '%s' "$s"
 }
 
-# 取 latest 失败时让用户手输版本标签（dl_gh 的 latest 依赖 GitHub API）
+# 取 latest 失败时让用户手输版本标签（GitHub API 可能限流）
 ocp_hy2_fetch_bin() {
-    local out="${1:-}" arch asset tag
+    local out="${1:-}" arch asset tag url
     arch="$(ocp_hy2_arch)" || return 1
     asset="hysteria-linux-${arch}"
-    if dl_gh apernet/hysteria latest "$asset" "$out"; then
-        return 0
+    tag="$(dl_latest_tag apernet/hysteria)"
+    if [[ -z "$tag" ]]; then
+        oc_warn "直接从 GitHub 获取最新版失败（网络或 API 受限）"
+        tag="$(oc_ask "请手动输入 Hysteria 版本标签（例如 app/v2.13.0）" "app/v2.13.0")"
+        [[ -n "$tag" ]] || return 1
     fi
-    oc_warn "直接从 GitHub 获取最新版失败（网络或 API 受限）"
-    tag="$(oc_ask "请手动输入 Hysteria 版本标签（例如 app/v2.13.0）" "app/v2.13.0")"
-    [[ -n "$tag" ]] || return 1
-    dl_fetch "https://github.com/apernet/hysteria/releases/download/${tag}/${asset}" "$out"
+    url="https://github.com/apernet/hysteria/releases/download/${tag}/${asset}"
+    # 整个 release 共用一份 hashes.txt，按资产 basename 匹配
+    dl_verify_fetch "$url" "$out" hashlist "$asset"
 }
 
 # 写服务端 YAML（/etc/oneclick/hysteria2/config.yaml，600）；内容无变化时不重写
@@ -137,14 +136,25 @@ ocp_hy2_write_unit() {
         "OneClick Hysteria2"
 }
 
-# 对外 IP：优先 db 里缓存的 settings.ip，避免每次外联探测
+# 对外 IP：优先 db 里缓存的 settings.ip，避免每次外联探测。
+# 探测失败返回空串，由调用方报错——绝不能兜底成 0.0.0.0 静默产出坏节点。
 ocp_hy2_ip() {
     local ip
     ip="$(db_setting ip)"
     if [[ -z "$ip" ]]; then
         ip="$(net_primary_ip)"
     fi
-    printf '%s' "${ip:-0.0.0.0}"
+    printf '%s' "$ip"
+}
+
+# 主机名片段：取不到 IP 返回 1（调用方据此报错，不产出坏节点）；
+# IPv6 必须加方括号才能拼进 URI/Surge/Loon 行。
+ocp_hy2_host() {
+    local ip
+    ip="$(ocp_hy2_ip)"
+    [[ -z "$ip" ]] && return 1
+    [[ "$ip" == *:* ]] && ip="[${ip}]"
+    printf '%s' "$ip"
 }
 
 # 自签证书才跳过校验；acme/existing 为真实证书
@@ -386,7 +396,7 @@ proto_hysteria2_status() {
 }
 
 proto_hysteria2_link() {
-    local pw port sni mode obfs obfs_pw hop ip host q
+    local pw port sni mode obfs obfs_pw hop host q
     pw="$(db_get hysteria2 password "")"
     port="$(db_get hysteria2 port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
@@ -395,9 +405,7 @@ proto_hysteria2_link() {
     obfs="$(db_get hysteria2 obfs off)"
     obfs_pw="$(db_get hysteria2 obfs_password "")"
     hop="$(db_get hysteria2 hop "")"
-    ip="$(ocp_hy2_ip)"
-    host="$ip"
-    [[ "$ip" == *:* ]] && host="[${ip}]"
+    host="$(ocp_hy2_host)" || return 1
     q="sni=${sni}"
     if [[ "$mode" == "self" ]]; then
         q+="&insecure=1"
@@ -458,7 +466,7 @@ proto_hysteria2_clash() {
     obfs="$(db_get hysteria2 obfs off)"
     obfs_pw="$(db_get hysteria2 obfs_password "")"
     hop="$(db_get hysteria2 hop "")"
-    ip="$(ocp_hy2_ip)"
+    ip="$(ocp_hy2_host)" || return 1
 
     printf '  - name: "%s"\n' "$(ocp_hy2_name)"
     printf '    type: hysteria2\n'
@@ -479,13 +487,14 @@ proto_hysteria2_clash() {
 }
 
 proto_hysteria2_surge() {
-    local pw port sni hop line
+    local pw port sni hop line host
     pw="$(db_get hysteria2 password "")"
     port="$(db_get hysteria2 port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get hysteria2 sni bing.com)"
     hop="$(db_get hysteria2 hop "")"
-    line="$(ocp_hy2_name) = hysteria2, $(ocp_hy2_ip), ${port}, password=${pw}, sni=${sni}"
+    host="$(ocp_hy2_host)" || return 1
+    line="$(ocp_hy2_name) = hysteria2, ${host}, ${port}, password=${pw}, sni=${sni}"
     # Surge 手册 policies/hysteria2.html：port-hopping 用分号分隔，设置后忽略主端口
     if [[ -n "$hop" ]]; then
         line+=", port-hopping=${hop}"
@@ -497,7 +506,7 @@ proto_hysteria2_surge() {
 }
 
 proto_hysteria2_singbox() {
-    local pw port sni obfs obfs_pw hop hop_ports ins
+    local pw port sni obfs obfs_pw hop hop_ports ins host name
     pw="$(db_get hysteria2 password "")"
     port="$(db_get hysteria2 port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
@@ -506,18 +515,21 @@ proto_hysteria2_singbox() {
     obfs_pw="$(db_get hysteria2 obfs_password "")"
     hop="$(db_get hysteria2 hop "")"
     ins="$(ocp_hy2_insecure)"
+    host="$(ocp_hy2_host)" || return 1
+    # tag 与 Clash/Surge/Loon 侧节点名保持一致，selector 里更好认
+    name="$(ocp_hy2_name)"
     hop_ports=""
     if [[ -n "$hop" ]]; then
         hop_ports="${hop/-/:}"
     fi
 
     jq -n \
-        --argjson port "$port" --arg server "$(ocp_hy2_ip)" --arg pw "$pw" \
+        --argjson port "$port" --arg server "$host" --arg pw "$pw" --arg tag "$name" \
         --arg sni "$sni" --argjson insecure "$ins" \
         --arg obfs "$obfs" --arg obfs_pw "$obfs_pw" --arg hop_ports "$hop_ports" '
         {
             type: "hysteria2",
-            tag: "oneclick-hysteria2",
+            tag: $tag,
             server: $server,
             server_port: $port,
             password: $pw
@@ -534,7 +546,7 @@ proto_hysteria2_singbox() {
 # Loon 片段：Hysteria2 在 Loon 里类型名是大写 Hysteria2，SNI 参数叫 tls-name，
 # 端口跳跃用 server-ports（Loon 的 hop 参数，见 Sub-Store 的 loon producer）。
 proto_hysteria2_loon() {
-    local pw port sni hop obfs obfs_pw line
+    local pw port sni hop obfs obfs_pw line host
     pw="$(db_get hysteria2 password "")"
     port="$(db_get hysteria2 port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
@@ -542,7 +554,8 @@ proto_hysteria2_loon() {
     hop="$(db_get hysteria2 hop "")"
     obfs="$(db_get hysteria2 obfs off)"
     obfs_pw="$(db_get hysteria2 obfs_password "")"
-    line="$(oc_loon_name hysteria2) = Hysteria2,$(ocp_hy2_ip),${port},\"${pw}\""
+    host="$(ocp_hy2_host)" || return 1
+    line="$(oc_loon_name hysteria2) = Hysteria2,${host},${port},\"${pw}\""
     [[ -n "$hop" ]] && line+=",server-ports=\"${hop}\""
     line+=",sni=${sni}"
     [[ "$(ocp_hy2_insecure)" == "1" ]] && line+=",skip-cert-verify=true"

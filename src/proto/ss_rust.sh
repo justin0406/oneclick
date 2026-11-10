@@ -18,6 +18,8 @@
 
 # 下载版本；OC_SSRUST_VER 为空表示取 GitHub 最新，取不到再用下面的已知版本兜底
 OC_SSRUST_VER="${OC_SSRUST_VER:-}"
+# ShadowTLS 版本；同样为空表示取最新，失败用兜底版本
+OC_SSRUST_STLS_VER="${OC_SSRUST_STLS_VER:-}"
 OC_SSRUST_FALLBACK_VER="1.25.0"
 OC_SSRUST_STLS_FALLBACK_VER="0.2.25"
 
@@ -395,9 +397,10 @@ ocp_ssrust_fetch_ss() {
         return 1
     }
     oc_info "下载 Shadowsocks-Rust v${ver}（${arch}）..."
-    if ! dl_fetch "$url" "$tmp/ss.tar.xz"; then
+    # 每个资产都有同名 .sha256（内容 "<hex>  <asset>"）
+    if ! dl_verify_fetch "$url" "$tmp/ss.tar.xz" plain "$asset"; then
         rm -rf -- "$tmp"
-        oc_err "Shadowsocks-Rust 下载失败（GitHub 可能不可达）"
+        oc_err "Shadowsocks-Rust 下载或校验失败（GitHub 可能不可达）"
         return 1
     fi
     if ! dl_untar "$tmp/ss.tar.xz" "$tmp/x"; then
@@ -437,9 +440,10 @@ ocp_ssrust_fetch_stls() {
         return 1
     }
     oc_info "下载 ShadowTLS v${ver}（${tar_arch}）..."
-    if ! dl_fetch "$url" "$tmp/shadow-tls"; then
+    # shadow-tls 的 release 不提供校验文件，只能做结构校验（ELF 魔数）
+    if ! dl_verify_fetch "$url" "$tmp/shadow-tls" none "$asset"; then
         rm -rf -- "$tmp"
-        oc_err "ShadowTLS 下载失败（GitHub 可能不可达）"
+        oc_err "ShadowTLS 下载失败（GitHub 可能不可达，或镜像返回了错误页）"
         return 1
     fi
     if ! install -m 755 "$tmp/shadow-tls" "$bin"; then
@@ -705,10 +709,10 @@ proto_ss_rust_uninstall() {
     svc_remove "$stl_unit"
     svc_remove "$unit"
     oc_ok "已停止并移除服务：${unit} ${stl_unit}"
-    # 两个二进制都只服务本协议，默认删除（OC_YES=1 按默认 yes 删，避免留孤儿）
+    # 默认保留二进制（可能被面板复用）；需要清理时交互里选 y，或走 --purge。
     if svc_bin_referenced "$(ocp_ssrust_bin)" || svc_bin_referenced "$(ocp_ssrust_stls_bin)"; then
         oc_warn "检测到其他 systemd 服务仍在引用 ssserver/shadow-tls，保留不删"
-    elif oc_confirm "同时删除 ssserver 与 shadow-tls 二进制？" y; then
+    elif oc_confirm "同时删除 ssserver 与 shadow-tls 二进制？" n; then
         rm -f -- "$(ocp_ssrust_bin)" && oc_ok "已删除 $(ocp_ssrust_bin)"
         rm -f -- "$(ocp_ssrust_stls_bin)" && oc_ok "已删除 $(ocp_ssrust_stls_bin)"
     fi

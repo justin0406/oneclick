@@ -22,6 +22,14 @@
 # 固定版本（升级只改这一处；同时用于下载 URL 与 db.version）
 OC_SNELL_VER="${OC_SNELL_VER:-6.0.0}"
 
+# 钉死版本的资产 SHA256（dl.nssurge.com 不提供校验文件，故在代码内固定）。
+# 升级 OC_SNELL_VER 时必须同步更新本表，否则会退回结构校验。
+declare -gA OC_SNELL_SHA256=(
+    [snell-server-v6.0.0-linux-amd64.zip]=8a9c4463ca87cfa5eaa37c6af0d37ab93ea275aa12391985bb2a375ca3abd7f2
+    [snell-server-v6.0.0-linux-aarch64.zip]=a0b2915cbc77dc3baf8fa069e741c20808d8a10c3a8a93e709a0a580645c3bd7
+    [snell-server-v6.0.0-linux-i386.zip]=67060ef79ac4ef0bb64c520302396620b3a06f8f6d5ceb450be283e4fa749335
+)
+
 # ---------- 内部辅助 ----------
 
 # OC_ARCH -> dl.nssurge.com 的架构段。注意上游叫 aarch64，而 OC_ARCH 叫 arm64
@@ -229,9 +237,13 @@ proto_snell_install() {
         url="https://dl.nssurge.com/snell/${asset}"
         tmp="$(mktemp -d "${TMPDIR:-/tmp}/oneclick-snell.XXXXXX")" || oc_die "创建临时目录失败"
         oc_info "下载 Snell v${OC_SNELL_VER}（linux-${arch}）..."
-        if ! dl_fetch "$url" "$tmp/snell.zip"; then
+        if ! dl_verify_fetch "$url" "$tmp/snell.zip" none "$asset"; then
             rm -rf -- "$tmp"
             oc_die "Snell 下载失败（dl.nssurge.com 可能限流或不可达）；可稍后重试或手动放到 $bin"
+        fi
+        if ! dl_verify_sha "$tmp/snell.zip" "${OC_SNELL_SHA256[$asset]:-}"; then
+            rm -rf -- "$tmp"
+            oc_die "Snell 校验失败（版本 v${OC_SNELL_VER} 的资产哈希与代码内记录不符）"
         fi
         if ! dl_unzip "$tmp/snell.zip" "$tmp/x"; then
             rm -rf -- "$tmp"
@@ -313,7 +325,7 @@ proto_snell_uninstall() {
         return 0
     fi
     if [[ "${OC_YES:-0}" != "1" ]]; then
-        oc_confirm "确认卸载 Snell v6（停止服务、删除配置与防火墙规则）？" n || {
+        oc_confirm "确认卸载 Snell v6（停止服务并删除配置）？" n || {
             oc_info "已取消"
             return 0
         }
@@ -327,11 +339,11 @@ proto_snell_uninstall() {
 
     svc_remove "$unit"
     oc_ok "已停止并移除服务：$unit"
-    # 默认一并删除；但若用户原有的 snell-server.service（或其他面板）还引用同一路径，
-    # 删掉会让别人的服务重启后起不来，此时保留并说明。
+    # 默认保留二进制：它可能被面板/其它脚本复用，删错代价高；
+    # 需要清理时在交互里选 y，或用 --purge 走彻底卸载。
     if svc_bin_referenced "$bin"; then
         oc_warn "检测到其他 systemd 服务仍引用 $bin（可能是你原有的 Snell 服务），保留不删"
-    elif oc_confirm "同时删除 snell-server 二进制 $bin ？" y; then
+    elif oc_confirm "同时删除 snell-server 二进制 $bin ？" n; then
         rm -f -- "$bin" && oc_ok "已删除 $bin"
     fi
     if [[ -n "$dir" && "$dir" == "${OC_ROOT}/"* && -d "$dir" ]]; then

@@ -10,6 +10,14 @@
 # sing-box 版本钉死（升级只改这一处；已装同版本时复用二进制，不重复下载）
 OC_SINGBOX_VER="${OC_SINGBOX_VER:-1.14.4}"
 
+# 钉死版本的资产 SHA256（官方 release 不发布校验文件，故在代码内固定）。
+# 升级 OC_SINGBOX_VER 时必须同步更新本表，否则会退回结构校验。
+declare -gA OC_SINGBOX_SHA256=(
+    [sing-box-1.14.4-linux-amd64.tar.gz]=699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968
+    [sing-box-1.14.4-linux-arm64.tar.gz]=436441f76ee2f7fe21b5b2d426d3cb261a480455a704865789ad533e4273ec26
+    [sing-box-1.14.4-linux-armv7.tar.gz]=fd164ed45ebc784f657a3e1d0e0ad0f68afdcff864ee57122c2cfed3ddb80a00
+)
+
 # ---------- 内部辅助 ----------
 
 ocp_anytls_dir() {
@@ -66,7 +74,16 @@ ocp_anytls_fetch_singbox() {
     arch="$(ocp_anytls_arch)" || return 1
     asset="sing-box-${ver}-linux-${arch}.tar.gz"
     tmpdir="$(mktemp -d)" || return 1
-    if ! dl_gh SagerNet/sing-box "v${ver}" "$asset" "$tmpdir/sing-box.tar.gz"; then
+    # sing-box 的 release 不发布校验文件；版本是钉死的，所以用代码内静态表兜底，
+    # 表里有值就强校验，没有（例如用户自定义 OC_SINGBOX_VER）退回结构校验。
+    if ! dl_verify_fetch "https://github.com/SagerNet/sing-box/releases/download/v${ver}/${asset}" \
+            "$tmpdir/sing-box.tar.gz" none "$asset"; then
+        rm -rf -- "$tmpdir"
+        return 1
+    fi
+    local known_sha
+    known_sha="${OC_SINGBOX_SHA256[$asset]:-}"
+    if [[ -n "$known_sha" ]] && ! dl_verify_sha "$tmpdir/sing-box.tar.gz" "$known_sha"; then
         rm -rf -- "$tmpdir"
         return 1
     fi
@@ -157,14 +174,25 @@ ocp_anytls_check_config() {
     fi
 }
 
-# 对外 IP：优先 db 里缓存的 settings.ip，避免每次外联探测
+# 对外 IP：优先 db 里缓存的 settings.ip，避免每次外联探测。
+# 探测失败返回空串，由调用方报错——绝不能兜底成 0.0.0.0 静默产出坏节点。
 ocp_anytls_ip() {
     local ip
     ip="$(db_setting ip)"
     if [[ -z "$ip" ]]; then
         ip="$(net_primary_ip)"
     fi
-    printf '%s' "${ip:-0.0.0.0}"
+    printf '%s' "$ip"
+}
+
+# 主机名片段：取不到 IP 返回 1（调用方据此报错，不产出坏节点）；
+# IPv6 必须加方括号才能拼进 URI/Surge/Loon 行。
+ocp_anytls_host() {
+    local ip
+    ip="$(ocp_anytls_ip)"
+    [[ -z "$ip" ]] && return 1
+    [[ "$ip" == *:* ]] && ip="[${ip}]"
+    printf '%s' "$ip"
 }
 
 # 自签证书才跳过校验；acme/existing 为真实证书
@@ -323,7 +351,7 @@ proto_anytls_uninstall() {
         oc_warn "AnyTLS 未安装"
         return 0
     fi
-    oc_confirm "确认卸载 AnyTLS（停止服务、删除配置与防火墙规则）？" y || {
+    oc_confirm "确认卸载 AnyTLS（停止服务并删除配置）？" y || {
         oc_info "已取消"
         return 0
     }
@@ -359,14 +387,12 @@ proto_anytls_status() {
 }
 
 proto_anytls_link() {
-    local pw port sni ip host q
+    local pw port sni host q
     pw="$(db_get anytls password "")"
     port="$(db_get anytls port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
-    ip="$(ocp_anytls_ip)"
-    host="$ip"
-    [[ "$ip" == *:* ]] && host="[${ip}]"
+    host="$(ocp_anytls_host)" || return 1
     q="sni=${sni}"
     if [[ "$(ocp_anytls_insecure)" == "1" ]]; then
         q+="&insecure=1"
@@ -414,7 +440,7 @@ proto_anytls_clash() {
     port="$(db_get anytls port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
-    ip="$(ocp_anytls_ip)"
+    ip="$(ocp_anytls_host)" || return 1
 
     printf '  - name: "%s"\n' "$(ocp_anytls_name)"
     printf '    type: anytls\n'
@@ -429,12 +455,13 @@ proto_anytls_clash() {
 }
 
 proto_anytls_surge() {
-    local pw port sni line
+    local pw port sni line host
     pw="$(db_get anytls password "")"
     port="$(db_get anytls port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
-    line="$(ocp_anytls_name) = anytls, $(ocp_anytls_ip), ${port}, password=${pw}, sni=${sni}"
+    host="$(ocp_anytls_host)" || return 1
+    line="$(ocp_anytls_name) = anytls, ${host}, ${port}, password=${pw}, sni=${sni}"
     if [[ "$(ocp_anytls_insecure)" == "1" ]]; then
         line+=", skip-cert-verify=true"
     fi
@@ -442,19 +469,22 @@ proto_anytls_surge() {
 }
 
 proto_anytls_singbox() {
-    local pw port sni ins
+    local pw port sni ins host name
     pw="$(db_get anytls password "")"
     port="$(db_get anytls port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
     ins="$(ocp_anytls_insecure)"
+    host="$(ocp_anytls_host)" || return 1
+    # tag 与 Clash/Surge/Loon 侧节点名保持一致
+    name="$(ocp_anytls_name)"
 
     jq -n \
-        --argjson port "$port" --arg server "$(ocp_anytls_ip)" \
+        --argjson port "$port" --arg server "$host" --arg tag "$name" \
         --arg pw "$pw" --arg sni "$sni" --argjson insecure "$ins" '
         {
             type: "anytls",
-            tag: "oneclick-anytls",
+            tag: $tag,
             server: $server,
             server_port: $port,
             password: $pw,
@@ -467,12 +497,13 @@ proto_anytls_singbox() {
 
 # Loon 片段：AnyTLS 在 Loon 里类型名是小写 anytls，SNI 参数叫 tls-name。
 proto_anytls_loon() {
-    local pw port sni line
+    local pw port sni line host
     pw="$(db_get anytls password "")"
     port="$(db_get anytls port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
-    line="$(oc_loon_name anytls) = AnyTLS,$(ocp_anytls_ip),${port},\"${pw}\""
+    host="$(ocp_anytls_host)" || return 1
+    line="$(oc_loon_name anytls) = AnyTLS,${host},${port},\"${pw}\""
     line+=",sni=${sni}"
     [[ "$(ocp_anytls_insecure)" == "1" ]] && line+=",skip-cert-verify=true"
     line+=",udp=true"

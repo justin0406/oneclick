@@ -1,0 +1,44 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+
+      - name: Install bats-core
+        run: sudo npm install -g bats
+
+      - name: Build and validate
+        run: ./build.sh
+
+      # dist/oneclick.sh 是用户直接 curl 下载的产物，必须与 src/ 完全一致。
+      # 改了 src 却忘了提交 dist，这一步会失败。
+      - name: Check dist is in sync with src
+        run: |
+          if ! git diff --quiet -- dist/oneclick.sh; then
+            echo "::error::dist/oneclick.sh 与 src/ 不一致，请运行 ./build.sh 并提交产物"
+            git diff --stat -- dist/oneclick.sh
+            exit 1
+          fi
+          echo "✓ dist 与 src 同步"
+
+      - name: Unit tests
+        run: bats tests/
+
+      - name: Smoke test
+        run: |
+          bash dist/oneclick.sh --version
+          bash dist/oneclick.sh --help >/dev/null
+          # 版本号必须与产物内嵌的一致
+          test "$(bash dist/oneclick.sh --version)" = "oneclick $(sed -n 's/^OC_VERSION="\([0-9.]*\)"$/\1/p' src/00-header.sh)"
+          echo "✓ 冒烟测试通过"
