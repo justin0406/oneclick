@@ -106,7 +106,8 @@ those belong in a panel. This script's job is to install and operate one machine
 
 ## Subscriptions
 
-`oc --sub` renders node-only snippets for the installed protocols, so you can paste them into
+The **Config info** menu lists only the protocols you have installed; pick one to see its Surge
+and Loon node lines straight away. To write files instead, `oc --sub` renders node-only snippets for the installed protocols, so you can paste them into
 an existing config instead of replacing it.
 
 - `sub/oneclick-clash.yaml` — Clash / mihomo proxy entries (paste under `proxies:`; mihomo supports Snell v1–v5 only, use Surge for v6)

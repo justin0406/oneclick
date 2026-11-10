@@ -249,50 +249,67 @@ share_qr() {
     fi
 }
 
-# share_print_info <key> —— 安装完成后的"配置信息"：URI + Surge + Loon 三种写法。
-# Surge 没有 VLESS 策略、Loon 没有 Snell，遇到不支持的协议直接说明原因，不静默省略。
+# share_print_info <key> [formats] —— 客户端写法。
+# formats 为空格分隔列表（uri surge loon），默认三种全给；菜单里只看客户端行时传 "surge loon"。
 share_print_info() {
-    local key="${1:-}" fn out
-    [[ -n "$key" ]] || {
-        oc_err "用法：share_print_info <key>"
+    local key="${1:-}" f fn out formats
+    if [[ -z "$key" ]]; then
+        oc_err "用法：share_print_info <key> [formats]"
         return 1
-    }
+    fi
+    if [[ $# -gt 1 ]]; then
+        shift
+        formats="$*"
+    else
+        formats="uri surge loon"
+    fi
     db_is_installed "$key" || return 1
     oc_title "配置信息：${OC_PROTO_TITLE[$key]:-$key}"
 
-    fn="$(_share_fn "$key" link)"
-    oc_info "URI："
-    if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
-        printf '  %s\n' "$out"
-    else
-        oc_warn "生成失败"
-    fi
-
-    oc_info "Surge："
-    case "$key" in
-        vless_reality) printf '  不支持（Surge 没有 VLESS 策略类型）\n' ;;
-        *)
-            fn="$(_share_fn "$key" surge)"
-            if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
-                printf '  %s\n' "$out"
-            else
-                oc_warn "生成失败"
-            fi
-            ;;
-    esac
-
-    oc_info "Loon："
-    case "$key" in
-        snell) printf '  不支持（Loon 没有 Snell 协议）\n' ;;
-        *)
-            fn="$(_share_fn "$key" loon)"
-            if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
-                printf '  %s\n' "$out"
-            else
-                oc_warn "生成失败"
-            fi
-            ;;
-    esac
+    for f in $formats; do
+        case "$f" in
+            uri)
+                oc_info "URI："
+                fn="$(_share_fn "$key" link)"
+                if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
+                    printf '  %s\n' "$out"
+                else
+                    oc_warn "生成失败"
+                fi
+                ;;
+            surge)
+                oc_info "Surge："
+                case "$key" in
+                    vless_reality) printf '  不支持（Surge 没有 VLESS 策略类型）\n' ;;
+                    *)
+                        fn="$(_share_fn "$key" surge)"
+                        if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
+                            printf '  %s\n' "$out"
+                        else
+                            oc_warn "生成失败"
+                        fi
+                        ;;
+                esac
+                ;;
+            loon)
+                oc_info "Loon："
+                case "$key" in
+                    snell) printf '  不支持（Loon 没有 Snell 协议）\n' ;;
+                    *)
+                        fn="$(_share_fn "$key" loon)"
+                        if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
+                            printf '  %s\n' "$out"
+                        else
+                            oc_warn "生成失败"
+                        fi
+                        ;;
+                esac
+                ;;
+            *)
+                oc_warn "未知格式：$f（可选 uri|surge|loon）"
+                ;;
+        esac
+    done
 }
 
 # share_print_links <key> —— URI + 三种订阅片段 + 二维码

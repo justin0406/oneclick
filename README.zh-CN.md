@@ -92,7 +92,8 @@ SS-Rust 固定使用 SS2022（`2022-blake3-aes-128-gcm`），安装时不再询�
 
 ## 订阅
 
-`oc --sub` 只生成节点片段，方便粘进你已有的配置，而不是替换整份配置：
+菜单「配置信息」只列出已安装的协议，选中后直接显示它的 Surge / Loon 写法。
+需要落文件时用 `oc --sub`，只生成节点片段，方便粘进你已有的配置，而不是替换整份配置：
 
 - `sub/oneclick-clash.yaml` — Clash / mihomo 节点项（粘到 `proxies:` 下；mihomo 仅支持 Snell v1–v5，v6 请用 Surge）
 - `sub/oneclick-surge.conf` — Surge 节点行（粘到 `[Proxy]` 段；不含 VLESS-Reality：Surge 没有 VLESS 策略类型）

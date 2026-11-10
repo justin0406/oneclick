@@ -9,7 +9,7 @@
 
 umask 077
 
-OC_VERSION="0.2.6"
+OC_VERSION="0.2.7"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -1733,50 +1733,67 @@ share_qr() {
     fi
 }
 
-# share_print_info <key> —— 安装完成后的"配置信息"：URI + Surge + Loon 三种写法。
-# Surge 没有 VLESS 策略、Loon 没有 Snell，遇到不支持的协议直接说明原因，不静默省略。
+# share_print_info <key> [formats] —— 客户端写法。
+# formats 为空格分隔列表（uri surge loon），默认三种全给；菜单里只看客户端行时传 "surge loon"。
 share_print_info() {
-    local key="${1:-}" fn out
-    [[ -n "$key" ]] || {
-        oc_err "用法：share_print_info <key>"
+    local key="${1:-}" f fn out formats
+    if [[ -z "$key" ]]; then
+        oc_err "用法：share_print_info <key> [formats]"
         return 1
-    }
+    fi
+    if [[ $# -gt 1 ]]; then
+        shift
+        formats="$*"
+    else
+        formats="uri surge loon"
+    fi
     db_is_installed "$key" || return 1
     oc_title "配置信息：${OC_PROTO_TITLE[$key]:-$key}"
 
-    fn="$(_share_fn "$key" link)"
-    oc_info "URI："
-    if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
-        printf '  %s\n' "$out"
-    else
-        oc_warn "生成失败"
-    fi
-
-    oc_info "Surge："
-    case "$key" in
-        vless_reality) printf '  不支持（Surge 没有 VLESS 策略类型）\n' ;;
-        *)
-            fn="$(_share_fn "$key" surge)"
-            if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
-                printf '  %s\n' "$out"
-            else
-                oc_warn "生成失败"
-            fi
-            ;;
-    esac
-
-    oc_info "Loon："
-    case "$key" in
-        snell) printf '  不支持（Loon 没有 Snell 协议）\n' ;;
-        *)
-            fn="$(_share_fn "$key" loon)"
-            if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
-                printf '  %s\n' "$out"
-            else
-                oc_warn "生成失败"
-            fi
-            ;;
-    esac
+    for f in $formats; do
+        case "$f" in
+            uri)
+                oc_info "URI："
+                fn="$(_share_fn "$key" link)"
+                if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
+                    printf '  %s\n' "$out"
+                else
+                    oc_warn "生成失败"
+                fi
+                ;;
+            surge)
+                oc_info "Surge："
+                case "$key" in
+                    vless_reality) printf '  不支持（Surge 没有 VLESS 策略类型）\n' ;;
+                    *)
+                        fn="$(_share_fn "$key" surge)"
+                        if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
+                            printf '  %s\n' "$out"
+                        else
+                            oc_warn "生成失败"
+                        fi
+                        ;;
+                esac
+                ;;
+            loon)
+                oc_info "Loon："
+                case "$key" in
+                    snell) printf '  不支持（Loon 没有 Snell 协议）\n' ;;
+                    *)
+                        fn="$(_share_fn "$key" loon)"
+                        if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
+                            printf '  %s\n' "$out"
+                        else
+                            oc_warn "生成失败"
+                        fi
+                        ;;
+                esac
+                ;;
+            *)
+                oc_warn "未知格式：$f（可选 uri|surge|loon）"
+                ;;
+        esac
+    done
 }
 
 # share_print_links <key> —— URI + 三种订阅片段 + 二维码
@@ -5211,60 +5228,28 @@ menu_cert() {
     done
 }
 
-# ---------- 4. 订阅 ----------
+# ---------- 4. 配置信息 ----------
 
-# 生成并直接显示内容：菜单里选格式就是为了马上看到/复制，不是只落个文件
-_sub_preview() {
-    local fmt="$1" path n
-    path="$(share_render_sub "$fmt")" || {
-        oc_err "生成失败（是否还没安装协议？）"
-        return 1
-    }
-    # 路径已经由 share 层打印（[*] X 订阅已写入：…），这里不再重复
-    echo
-    if [[ "$fmt" == "singbox" ]]; then
-        n="$(wc -l < "$path" 2>/dev/null | tr -d ' ')"
-        oc_info "内容（共 ${n:-0} 行，前 40 行）："
-        head -n 40 "$path" | sed 's/^/  /'
-        [[ "${n:-0}" -gt 40 ]] && oc_info "其余 $((n - 40)) 行见文件"
-    else
-        oc_info "内容："
-        sed 's/^/  /' "$path"
-    fi
-}
-
-menu_sub() {
-    while true; do
-        local c f
-        c="$(oc_menu "订阅与分享" \
-            "生成全部" \
-            "URI 列表" \
-            "Clash" \
-            "Surge" \
-            "Loon" \
-            "sing-box" \
-            "订阅目录")" || return 0
-        case "$c" in
-            0) return 0 ;;
-            1) for f in uri clash surge loon; do
-                   share_render_sub "$f" >/dev/null || oc_warn "$f 生成失败"
-               done
-               oc_ok "已生成到 $OC_SUB_DIR"
-               for f in "$OC_SUB_DIR"/oneclick-*; do
-                   [[ -f "$f" ]] || continue
-                   oc_kv "$(basename "$f")" "$(wc -c < "$f" | tr -d ' ') 字节"
-               done
-               oc_pause ;;
-            2) _sub_preview uri; oc_pause ;;
-            3) _sub_preview clash; oc_pause ;;
-            4) _sub_preview surge; oc_pause ;;
-            5) _sub_preview loon; oc_pause ;;
-            6) _sub_preview singbox; oc_pause ;;
-            7) oc_kv "订阅目录" "$OC_SUB_DIR"
-               ls -l "$OC_SUB_DIR" 2>/dev/null || oc_warn "目录为空"
-               oc_pause ;;
-        esac
+# 只列已装协议；选中后直接给该协议的 Surge / Loon 客户端写法
+menu_config() {
+    local -a items=() keys=()
+    local k sel
+    for k in "${OC_PROTOS[@]}"; do
+        db_is_installed "$k" || continue
+        items+=("$(oc_title_of "$k")  $(oc_meta_field "$k" port)")
+        keys+=("$k")
     done
+    if [[ ${#keys[@]} -eq 0 ]]; then
+        oc_warn "还没有安装任何协议，先去菜单 1 安装"
+        oc_pause
+        return 0
+    fi
+
+    sel="$(oc_menu "配置信息" "${items[@]}")" || return 0
+    [[ "$sel" == "0" ]] && return 0
+    k="${keys[$((sel - 1))]}"
+    share_print_info "$k" surge loon || oc_warn "暂时取不到配置信息（可能还没获取到公网 IP）"
+    oc_pause
 }
 
 # ---------- 5. 备份 / 恢复 / 卸载 ----------
@@ -5459,14 +5444,14 @@ main_menu() {
             "安装协议" \
             "节点管理" \
             "证书管理" \
-            "订阅与分享" \
+            "配置信息" \
             "备份与恢复")" || return 0
         case "$c" in
             0) printf '\n%b再见%b\n\n' "$C_DIM" "$C_N"; return 0 ;;
             1) menu_install ;;
             2) menu_manage ;;
             3) menu_cert ;;
-            4) menu_sub ;;
+            4) menu_config ;;
             5) menu_backup ;;
         esac
         unset OC_MENU_ZERO_LABEL
