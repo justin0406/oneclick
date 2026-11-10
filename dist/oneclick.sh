@@ -9,7 +9,7 @@
 
 umask 077
 
-OC_VERSION="0.2.2"
+OC_VERSION="0.2.3"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -3495,12 +3495,14 @@ ocp_ssrust_port_ok() {
     ((n >= 1 && n <= 65535))
 }
 
-# OC_ARCH -> shadowsocks-rust release 的 target 段（glibc 版 tar.xz）
+# OC_ARCH -> shadowsocks-rust release 的 target 段。
+# 一律选 musl 静态版：官方 gnu 版在 Ubuntu 24.04 上构建，要求 GLIBC_2.38+，
+# 在 Debian 12 / Ubuntu 22.04 等 glibc 较旧的目标机上会直接报 "GLIBC_2.38 not found"。
 ocp_ssrust_arch() {
     case "${1:-${OC_ARCH:-}}" in
-        amd64)  printf 'x86_64-unknown-linux-gnu' ;;
-        arm64)  printf 'aarch64-unknown-linux-gnu' ;;
-        armv7l) printf 'armv7-unknown-linux-gnueabihf' ;;
+        amd64)  printf 'x86_64-unknown-linux-musl' ;;
+        arm64)  printf 'aarch64-unknown-linux-musl' ;;
+        armv7l) printf 'armv7-unknown-linux-musleabihf' ;;
         i386)   printf 'i686-unknown-linux-musl' ;;
         *)      oc_err "SS-Rust 不支持当前架构：${1:-${OC_ARCH:-未知}}" ;;
     esac
@@ -3823,9 +3825,12 @@ ocp_ssrust_fetch_ss() {
         return 1
     fi
     rm -rf -- "$tmp"
-    # 软校验：真跑不起来时下面的启动校验会带着 journalctl 日志报错，这里只提示
-    if [[ -z "$("$bin" -h 2>&1 | head -n1 || true)" ]]; then
-        oc_warn "ssserver 已落盘但自检无输出（架构是否匹配？），继续依赖启动校验"
+    # 硬校验：能执行才算装好。-h 会把 "GLIBC_x.y not found" 打到 stderr，
+    # 只看有无输出会误判，这里必须看退出码。
+    if ! "$bin" -V >/dev/null 2>&1 && ! "$bin" -h >/dev/null 2>&1; then
+        oc_err "ssserver 无法执行（架构不匹配或依赖缺失）：$bin"
+        "$bin" -V 2>&1 | head -n3 >&2 || true
+        return 1
     fi
 }
 
@@ -3852,6 +3857,9 @@ ocp_ssrust_fetch_stls() {
         return 1
     fi
     rm -rf -- "$tmp"
+    if ! "$bin" -V >/dev/null 2>&1 && ! "$bin" --version >/dev/null 2>&1; then
+        oc_warn "shadow-tls 已落盘但无法执行（架构或依赖问题）：$bin"
+    fi
 }
 
 # ---------- SPEC §10 契约函数 ----------
