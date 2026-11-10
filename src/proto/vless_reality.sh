@@ -111,10 +111,11 @@ ocp_vless_reality_cfg_write() {
         --arg sni "$sni" \
         --arg sid "$sid" \
         --arg dest "$dest" \
+        --arg bind "$(oc_listen_host)" \
         '{
             log: {loglevel: "warning"},
             inbounds: [{
-                listen: "0.0.0.0",
+                listen: $bind,
                 port: $port,
                 protocol: "vless",
                 settings: {

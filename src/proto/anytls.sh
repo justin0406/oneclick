@@ -108,13 +108,14 @@ ocp_anytls_write_config() {
         --arg pw "$pw" \
         --arg sni "$sni" \
         --arg cert "$cert" \
-        --arg key "$key" '
+        --arg key "$key" \
+        --arg bind "$(oc_listen_host)" '
         {
             log: {level: "warn", timestamp: true},
             inbounds: [{
                 type: "anytls",
                 tag: "oneclick-anytls",
-                listen: "::",
+                listen: $bind,
                 listen_port: $port,
                 users: [{name: "oneclick", password: $pw}],
                 tls: {

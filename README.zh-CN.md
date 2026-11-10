@@ -90,6 +90,9 @@ SS-Rust 固定使用 SS2022（`2022-blake3-aes-128-gcm`），安装时不再询�
 /etc/systemd/system/oneclick-<协议>.service
 ```
 
+**监听双栈。** 机器有 IPv6 栈时，SS-Rust、ShadowTLS、VLESS-Reality、AnyTLS 绑 `::`（Linux 默认双栈，
+IPv4 仍可连）；没有 IPv6 栈时自动退回 `0.0.0.0`。Hysteria2 默认双栈；Snell 仍只监听 IPv4。
+
 ## 订阅
 
 菜单「配置信息」只列出已安装的协议，选中后直接显示它的 Surge / Loon 写法。

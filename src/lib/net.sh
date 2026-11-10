@@ -134,3 +134,29 @@ net_port_pick() {
     # 一个都找不到属于极端情况：输出空，由调用方报错
     return 1
 }
+
+# IPv6 栈可用性：有栈才敢绑 ::（Linux 下绑 :: 默认双栈，IPv4 连接也能进来）
+oc_ipv6_ready() {
+    [[ -r /proc/net/if_inet6 && -s /proc/net/if_inet6 ]] && return 0
+    command -v ip >/dev/null 2>&1 && ip -6 addr show 2>/dev/null | grep -q 'inet6 ' && return 0
+    return 1
+}
+
+# 监听主机：有 IPv6 栈用 "::"（双栈），否则 "0.0.0.0"
+oc_listen_host() {
+    if oc_ipv6_ready; then
+        printf '::'
+    else
+        printf '0.0.0.0'
+    fi
+}
+
+# 监听地址:端口：有 IPv6 栈用 "[::]:port"，否则 "0.0.0.0:port"
+oc_listen_addr() {
+    local port="$1"
+    if oc_ipv6_ready; then
+        printf '[::]:%s' "$port"
+    else
+        printf '0.0.0.0:%s' "$port"
+    fi
+}

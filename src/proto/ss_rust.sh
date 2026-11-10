@@ -274,8 +274,9 @@ ocp_ssrust_write_config() {
         --arg method "$method" \
         --arg mode "$mode" \
         --argjson timeout "$timeout" \
+        --arg bind "$(oc_listen_host)" \
         '{
-            server: "0.0.0.0",
+            server: $bind,
             server_port: $port,
             password: $password,
             method: $method,
@@ -313,13 +314,14 @@ ocp_ssrust_write_stls_config() {
         --arg ss_addr "127.0.0.1:${ss_port}" \
         --arg sni "${sni}:443" \
         --arg password "$password" \
+        --arg bind "$(oc_listen_addr "$stls_port")" \
         '{
             v3: true,
             strict: true,
             fastopen: false,
             disable_nodelay: false,
             server: {
-                listen: ("0.0.0.0:" + ($stls_port | tostring)),
+                listen: $bind,
                 server_addr: $ss_addr,
                 tls_addr: {
                     wildcard_sni: "authed",

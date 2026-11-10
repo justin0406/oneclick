@@ -104,6 +104,10 @@ those belong in a panel. This script's job is to install and operate one machine
 /etc/systemd/system/oneclick-<protocol>.service
 ```
 
+**Dual-stack listeners.** SS-Rust, ShadowTLS, VLESS-Reality and AnyTLS bind `::` (dual-stack, IPv4
+still reachable) when the machine has an IPv6 stack, and fall back to `0.0.0.0` when it does not.
+Hysteria2 listens on both families by default; Snell stays IPv4-only.
+
 ## Subscriptions
 
 The **Config info** menu lists only the protocols you have installed; pick one to see its Surge

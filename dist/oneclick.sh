@@ -9,7 +9,7 @@
 
 umask 077
 
-OC_VERSION="0.2.7"
+OC_VERSION="0.2.8"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -817,6 +817,32 @@ net_port_pick() {
     done
     # 一个都找不到属于极端情况：输出空，由调用方报错
     return 1
+}
+
+# IPv6 栈可用性：有栈才敢绑 ::（Linux 下绑 :: 默认双栈，IPv4 连接也能进来）
+oc_ipv6_ready() {
+    [[ -r /proc/net/if_inet6 && -s /proc/net/if_inet6 ]] && return 0
+    command -v ip >/dev/null 2>&1 && ip -6 addr show 2>/dev/null | grep -q 'inet6 ' && return 0
+    return 1
+}
+
+# 监听主机：有 IPv6 栈用 "::"（双栈），否则 "0.0.0.0"
+oc_listen_host() {
+    if oc_ipv6_ready; then
+        printf '::'
+    else
+        printf '0.0.0.0'
+    fi
+}
+
+# 监听地址:端口：有 IPv6 栈用 "[::]:port"，否则 "0.0.0.0:port"
+oc_listen_addr() {
+    local port="$1"
+    if oc_ipv6_ready; then
+        printf '[::]:%s' "$port"
+    else
+        printf '0.0.0.0:%s' "$port"
+    fi
 }
 
 # ===== src/lib/cert.sh =====
@@ -1965,10 +1991,11 @@ ocp_vless_reality_cfg_write() {
         --arg sni "$sni" \
         --arg sid "$sid" \
         --arg dest "$dest" \
+        --arg bind "$(oc_listen_host)" \
         '{
             log: {loglevel: "warning"},
             inbounds: [{
-                listen: "0.0.0.0",
+                listen: $bind,
                 port: $port,
                 protocol: "vless",
                 settings: {
@@ -3754,8 +3781,9 @@ ocp_ssrust_write_config() {
         --arg method "$method" \
         --arg mode "$mode" \
         --argjson timeout "$timeout" \
+        --arg bind "$(oc_listen_host)" \
         '{
-            server: "0.0.0.0",
+            server: $bind,
             server_port: $port,
             password: $password,
             method: $method,
@@ -3793,13 +3821,14 @@ ocp_ssrust_write_stls_config() {
         --arg ss_addr "127.0.0.1:${ss_port}" \
         --arg sni "${sni}:443" \
         --arg password "$password" \
+        --arg bind "$(oc_listen_addr "$stls_port")" \
         '{
             v3: true,
             strict: true,
             fastopen: false,
             disable_nodelay: false,
             server: {
-                listen: ("0.0.0.0:" + ($stls_port | tostring)),
+                listen: $bind,
                 server_addr: $ss_addr,
                 tls_addr: {
                     wildcard_sni: "authed",
@@ -4630,13 +4659,14 @@ ocp_anytls_write_config() {
         --arg pw "$pw" \
         --arg sni "$sni" \
         --arg cert "$cert" \
-        --arg key "$key" '
+        --arg key "$key" \
+        --arg bind "$(oc_listen_host)" '
         {
             log: {level: "warn", timestamp: true},
             inbounds: [{
                 type: "anytls",
                 tag: "oneclick-anytls",
-                listen: "::",
+                listen: $bind,
                 listen_port: $port,
                 users: [{name: "oneclick", password: $pw}],
                 tls: {
