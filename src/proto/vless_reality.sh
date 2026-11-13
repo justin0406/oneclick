@@ -532,6 +532,8 @@ proto_vless_reality_loon() {
     pub="$(db_get "$key" public_key "")"
     [[ -n "$ip" && -n "$uuid" && -n "$sid" && -n "$pub" ]] || return 1
     name="$(oc_loon_name "$key")"
-    printf '%s = VLESS,%s,%s,"%s",transport=tcp,over-tls=true,tls-profile=chrome,flow=xtls-rprx-vision,sni=%s,public-key="%s",short-id=%s,udp=true\n' \
+    # 不加 udp=true：Loon 的 VLESS 节点没有这个参数（参照 Sub-Store 的 Loon 生成器，
+    # 它只在 shadowsocks 一类的节点上输出 udp），多带一个未知键会让节点解析不完整。
+    printf '%s = VLESS,%s,%s,"%s",transport=tcp,over-tls=true,tls-profile=chrome,flow=xtls-rprx-vision,sni=%s,public-key="%s",short-id=%s\n' \
         "$name" "$ip" "$port" "$uuid" "$sni" "$pub" "$sid"
 }
