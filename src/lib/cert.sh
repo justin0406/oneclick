@@ -508,7 +508,11 @@ reality_keypair() {
         return 1
     fi
     xray=""
-    if [[ -x /usr/local/bin/xray ]]; then
+    # 本脚本把内核装在私有目录，这里必须优先看它；
+    # 以前只看 /usr/local/bin 和 PATH，装完 xray 也会被判成"没有 xray"。
+    if [[ -n "${OC_BIN_DIR:-}" && -x "$OC_BIN_DIR/xray" ]]; then
+        xray="$OC_BIN_DIR/xray"
+    elif [[ -x /usr/local/bin/xray ]]; then
         xray="/usr/local/bin/xray"
     elif command -v xray >/dev/null 2>&1; then
         xray="$(command -v xray)"
@@ -516,16 +520,17 @@ reality_keypair() {
     if [[ -n "$xray" ]]; then
         out="$("$xray" x25519 2>/dev/null || true)"
         priv="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*[Pp]rivate[[:space:]]*[Kk]ey[[:space:]]*:[[:space:]]*//p' | head -n1)"
-        pub="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*[Pp]ublic[[:space:]]*[Kk]ey[[:space:]]*:[[:space:]]*//p' | head -n1)"
+        pub="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*[Pp]ublic[[:space:]]*[Kk]ey[^:]*:[[:space:]]*//p' | head -n1)"
         if [[ -z "$pub" ]]; then
-            # 新版 xray 把 public key 标成 Password
-            pub="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*[Pp]assword[[:space:]]*:[[:space:]]*//p' | head -n1)"
+            # 新版 xray 的格式是 "Password (PublicKey): xxx"，
+            # 旧正则要求 Password 后面紧跟冒号，26.x 起再也匹配不上。
+            pub="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*[Pp]assword[^:]*:[[:space:]]*//p' | head -n1)"
         fi
         if [[ -n "$priv" && -z "$pub" ]]; then
             out="$("$xray" x25519 -i "$priv" 2>/dev/null || true)"
-            pub="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*[Pp]ublic[[:space:]]*[Kk]ey[[:space:]]*:[[:space:]]*//p' | head -n1)"
+            pub="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*[Pp]ublic[[:space:]]*[Kk]ey[^:]*:[[:space:]]*//p' | head -n1)"
             if [[ -z "$pub" ]]; then
-                pub="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*[Pp]assword[[:space:]]*:[[:space:]]*//p' | head -n1)"
+                pub="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*[Pp]assword[^:]*:[[:space:]]*//p' | head -n1)"
             fi
         fi
         if [[ -n "$priv" && -n "$pub" ]]; then
