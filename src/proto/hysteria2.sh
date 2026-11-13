@@ -136,6 +136,23 @@ ocp_hy2_write_unit() {
         "OneClick Hysteria2"
 }
 
+# 清理 hysteria 端口跳跃留下的 nft 表（table ip/ip6 hysteria_<hash>）。
+# hysteria 退出时会尝试自清，但 systemctl stop 后实测 IPv6 表仍残留。
+# 只删名字以 hysteria_ 开头的表，不碰用户自己的规则。
+ocp_hy2_clean_hop_rules() {
+    command -v nft >/dev/null 2>&1 || return 0
+    local fam t
+    for fam in ip ip6; do
+        # nft list tables 输出形如 "table ip6 hysteria_e7aaa587"
+        while read -r t; do
+            [[ -n "$t" ]] || continue
+            nft delete table "$fam" "$t" 2>/dev/null \
+                && oc_info "已清理端口跳跃转发规则：table $fam $t"
+        done < <(nft list tables 2>/dev/null | awk -v f="$fam" '$1=="table" && $2==f && $3 ~ /^hysteria_/ {print $3}')
+    done
+    return 0
+}
+
 # 对外 IP：优先 db 里缓存的 settings.ip，避免每次外联探测。
 # 探测失败返回空串，由调用方报错——绝不能兜底成 0.0.0.0 静默产出坏节点。
 ocp_hy2_ip() {
@@ -361,6 +378,9 @@ proto_hysteria2_uninstall() {
     }
     port="$(db_get hysteria2 port "")"
     svc_remove "$unit"
+    # 端口跳跃的转发规则本应由 hysteria 退出时自清，实测 stop 后仍会残留
+    # （常见于 IPv6 表），这里按表名兜底清理，避免规则越积越多。
+    ocp_hy2_clean_hop_rules
     dir="$(ocp_hy2_dir)"
     if [[ -n "$dir" && "$dir" == "${OC_ROOT}/"* && -d "$dir" ]]; then
         rm -rf -- "$dir"

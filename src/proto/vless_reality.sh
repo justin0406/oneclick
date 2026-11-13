@@ -435,7 +435,9 @@ proto_vless_reality_regen() {
     local dir staging
     dir="$(oc_proto_dir "$key")"
     cfg="$dir/config.json"
-    staging="${cfg}.new"
+    # staging 必须保留 .json 扩展名：xray 按扩展名判断配置格式，
+    # config.json.new 会被判成未知格式（Failed to get format），自检必然失败。
+    staging="$dir/config.staging.json"
     # 先写 staging 再自检：校验不过时在线配置原封不动，服务继续用旧配置跑
     if ! ocp_vless_reality_cfg_write "$port" "$uuid" "$priv" "$sni" "$sid" "$dest" "$staging" >/dev/null; then
         rm -f "$staging"

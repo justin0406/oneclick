@@ -372,6 +372,9 @@ _bk_purge() {
     done
     # 旧版本留下的 BBR/TFO 调优文件（新版本不再写 sysctl）
     rm -f -- /etc/sysctl.d/99-oneclick-bbr.conf
+    # 端口跳跃的 nft 表兜底：上面按协议 uninstall 已清过一次，但若 db 记录缺失
+    # 导致协议被跳过，规则就会残留（实测 systemctl stop 后 IPv6 表会留下）。
+    command -v nft >/dev/null 2>&1 && ocp_hy2_clean_hop_rules
     # acme.sh：只有本脚本装过才清续期任务与目录
     if [[ "$(db_setting acme_installed 0)" == "1" && -d "$HOME/.acme.sh" ]]; then
         if crontab -l 2>/dev/null | grep -qF "$HOME/.acme.sh/acme.sh"; then

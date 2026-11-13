@@ -365,3 +365,38 @@ EOF
     # 两行都必须是纯密钥，不能含提示文本
     [[ "$kp" != *"✓"* ]] || { echo "混入了日志文本：[$kp]"; return 1; }
 }
+
+# ---------- regen staging 文件名：xray 按扩展名判格式 ----------
+# 曾经用 config.json.new，xray 报 "Failed to get format"，导致 --regen 永远失败。
+
+@test "vless_regen_staging_keeps_json_extension" {
+    # 直接断言源码里的 staging 命名约定：必须以 .json 结尾
+    local src="${BATS_TEST_DIRNAME}/../src/proto/vless_reality.sh"
+    grep -q 'staging="$dir/config.staging.json"' "$src" || {
+        echo "staging 文件名不是 .json 结尾，xray 会拒绝自检"; return 1; }
+    # 反向断言：不应再出现 .new 结尾
+    if grep -q 'staging="\${cfg}.new"' "$src"; then
+        echo "仍在用 config.json.new"; return 1
+    fi
+}
+
+# ---------- hysteria 端口跳跃的 nft 表清理 ----------
+# systemctl stop 后 hysteria 自清不完整，IPv6 表会残留。
+
+@test "hy2_clean_hop_rules_exists_and_is_scoped" {
+    declare -F ocp_hy2_clean_hop_rules >/dev/null || {
+        echo "缺少 ocp_hy2_clean_hop_rules"; return 1; }
+    # 必须只在表名以 hysteria_ 开头时删除，不能碰用户自己的规则
+    local body
+    body="$(declare -f ocp_hy2_clean_hop_rules)"
+    [[ "$body" == *'hysteria_'* ]] || { echo "未按 hysteria_ 前缀过滤"; return 1; }
+    [[ "$body" == *'nft delete table'* ]] || { echo "未调用 nft delete"; return 1; }
+}
+
+@test "uninstall_paths_clean_hop_rules" {
+    local src="${BATS_TEST_DIRNAME}/../src"
+    grep -q 'ocp_hy2_clean_hop_rules' "$src/proto/hysteria2.sh" || {
+        echo "卸载路径未清理 nft 规则"; return 1; }
+    grep -q 'ocp_hy2_clean_hop_rules' "$src/99-menu.sh" || {
+        echo "purge 路径未兜底清理 nft 规则"; return 1; }
+}

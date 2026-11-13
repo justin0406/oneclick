@@ -17,7 +17,7 @@ if (( BASH_VERSINFO[0] < 4 )); then
     exit 1
 fi
 
-OC_VERSION="0.4.4"
+OC_VERSION="0.4.5"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -2439,7 +2439,9 @@ proto_vless_reality_regen() {
     local dir staging
     dir="$(oc_proto_dir "$key")"
     cfg="$dir/config.json"
-    staging="${cfg}.new"
+    # staging 必须保留 .json 扩展名：xray 按扩展名判断配置格式，
+    # config.json.new 会被判成未知格式（Failed to get format），自检必然失败。
+    staging="$dir/config.staging.json"
     # 先写 staging 再自检：校验不过时在线配置原封不动，服务继续用旧配置跑
     if ! ocp_vless_reality_cfg_write "$port" "$uuid" "$priv" "$sni" "$sid" "$dest" "$staging" >/dev/null; then
         rm -f "$staging"
@@ -2694,6 +2696,23 @@ ocp_hy2_write_unit() {
         "OneClick Hysteria2"
 }
 
+# 清理 hysteria 端口跳跃留下的 nft 表（table ip/ip6 hysteria_<hash>）。
+# hysteria 退出时会尝试自清，但 systemctl stop 后实测 IPv6 表仍残留。
+# 只删名字以 hysteria_ 开头的表，不碰用户自己的规则。
+ocp_hy2_clean_hop_rules() {
+    command -v nft >/dev/null 2>&1 || return 0
+    local fam t
+    for fam in ip ip6; do
+        # nft list tables 输出形如 "table ip6 hysteria_e7aaa587"
+        while read -r t; do
+            [[ -n "$t" ]] || continue
+            nft delete table "$fam" "$t" 2>/dev/null \
+                && oc_info "已清理端口跳跃转发规则：table $fam $t"
+        done < <(nft list tables 2>/dev/null | awk -v f="$fam" '$1=="table" && $2==f && $3 ~ /^hysteria_/ {print $3}')
+    done
+    return 0
+}
+
 # 对外 IP：优先 db 里缓存的 settings.ip，避免每次外联探测。
 # 探测失败返回空串，由调用方报错——绝不能兜底成 0.0.0.0 静默产出坏节点。
 ocp_hy2_ip() {
@@ -2919,6 +2938,9 @@ proto_hysteria2_uninstall() {
     }
     port="$(db_get hysteria2 port "")"
     svc_remove "$unit"
+    # 端口跳跃的转发规则本应由 hysteria 退出时自清，实测 stop 后仍会残留
+    # （常见于 IPv6 表），这里按表名兜底清理，避免规则越积越多。
+    ocp_hy2_clean_hop_rules
     dir="$(ocp_hy2_dir)"
     if [[ -n "$dir" && "$dir" == "${OC_ROOT}/"* && -d "$dir" ]]; then
         rm -rf -- "$dir"
@@ -5586,6 +5608,9 @@ _bk_purge() {
     done
     # 旧版本留下的 BBR/TFO 调优文件（新版本不再写 sysctl）
     rm -f -- /etc/sysctl.d/99-oneclick-bbr.conf
+    # 端口跳跃的 nft 表兜底：上面按协议 uninstall 已清过一次，但若 db 记录缺失
+    # 导致协议被跳过，规则就会残留（实测 systemctl stop 后 IPv6 表会留下）。
+    command -v nft >/dev/null 2>&1 && ocp_hy2_clean_hop_rules
     # acme.sh：只有本脚本装过才清续期任务与目录
     if [[ "$(db_setting acme_installed 0)" == "1" && -d "$HOME/.acme.sh" ]]; then
         if crontab -l 2>/dev/null | grep -qF "$HOME/.acme.sh/acme.sh"; then
