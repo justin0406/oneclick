@@ -362,6 +362,11 @@ ocp_ssrust_cfg_stls_port() {
 
 ocp_ssrust_ip() {
     local ip
+    # 双栈输出时由外层设置 OC_IP_OVERRIDE 指定本次渲染用的地址
+    if [[ -n "${OC_IP_OVERRIDE:-}" ]]; then
+        printf '%s' "$OC_IP_OVERRIDE"
+        return 0
+    fi
     ip="$(db_setting ip)"
     if [[ -z "$ip" ]]; then
         ip="$(net_primary_ip)"
@@ -1050,7 +1055,8 @@ proto_ss_rust_clash() {
     port="$(db_get ss_rust port "")"
     method="$(db_get ss_rust method "$OC_SSRUST_METHOD")"
     password="$(db_get ss_rust password "")"
-    host="$(ocp_ssrust_host)" || {
+    host="$(ocp_ssrust_ip)"
+    [[ -n "$host" ]] || {
         oc_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
         return 1
     }

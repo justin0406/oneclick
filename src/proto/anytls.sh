@@ -180,6 +180,11 @@ ocp_anytls_check_config() {
 # 探测失败返回空串，由调用方报错——绝不能兜底成 0.0.0.0 静默产出坏节点。
 ocp_anytls_ip() {
     local ip
+    # 双栈输出时由外层设置 OC_IP_OVERRIDE 指定本次渲染用的地址
+    if [[ -n "${OC_IP_OVERRIDE:-}" ]]; then
+        printf '%s' "$OC_IP_OVERRIDE"
+        return 0
+    fi
     ip="$(db_setting ip)"
     if [[ -z "$ip" ]]; then
         ip="$(net_primary_ip)"
@@ -524,7 +529,8 @@ proto_anytls_clash() {
     port="$(db_get anytls port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
-    ip="$(ocp_anytls_host)" || return 1
+    ip="$(ocp_anytls_ip)"
+    [[ -n "$ip" ]] || return 1
 
     printf '  - name: "%s"\n' "$(ocp_anytls_name)"
     printf '    type: anytls\n'

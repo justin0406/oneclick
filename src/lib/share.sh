@@ -21,6 +21,72 @@ oc_loon_name() {
     printf '%s' "${n// /-}"
 }
 
+# ===========================================================================
+# 双栈输出
+# ===========================================================================
+#
+# 服务器同时有公网 IPv4 和 IPv6 时，每种格式各输出两份完整配置（地址不同、
+# 节点名相同，靠地址区分）；单栈则只输出一份。
+#
+# 实现方式：不改各协议渲染函数的签名，而是由 share_dual 逐个地址设置
+# OC_IP_OVERRIDE，让 *_ip 助手返回指定地址，渲染完再恢复。
+# 这样所有格式（uri/clash/surge/loon/singbox）自动获得双栈能力。
+
+# 本次输出要覆盖的地址列表（stdout 每行一个）。
+# 顺序固定 IPv4 在前，保证订阅里主节点排第一。
+share_ip_list() {
+    local v4 v6
+    # 注意：db_setting 单参数才是读取（传第二个参数会走写入分支，把 ip 清空）
+    v4="$(db_setting ip)"
+    [[ -z "$v4" ]] && v4="$(net_primary_ip)"
+    v6="$(net_ipv6)"
+    [[ -n "$v4" ]] && printf '%s\n' "$v4"
+    [[ -n "$v6" ]] && printf '%s\n' "$v6"
+    return 0
+}
+
+# share_dual <key> <format> —— 输出该协议在全部可用地址上的片段（每地址一份）
+# 单栈时就是一份，与改造前行为一致。
+share_dual() {
+    local key="$1" format="$2" fn ip out rc=0 saved="${OC_IP_OVERRIDE:-}"
+    local -a ips=()
+    fn="$(_share_fn "$key" "$format")"
+    while IFS= read -r ip; do
+        [[ -n "$ip" ]] && ips+=("$ip")
+    done < <(share_ip_list)
+    if [[ ${#ips[@]} -eq 0 ]]; then
+        # 一个地址都取不到：交给渲染函数自己报错（保持原有错误语义）
+        "$fn"
+        return $?
+    fi
+    local n=0
+    for ip in "${ips[@]}"; do
+        OC_IP_OVERRIDE="$ip"
+        if ! out="$("$fn")"; then
+            rc=1
+            continue
+        fi
+        n=$((n + 1))
+        if [[ "$format" == "singbox" ]]; then
+            # sing-box 片段必须是单行 JSON 对象（有些协议用 jq -n 输出多行缩进格式），
+            # 且双栈时 tag 是唯一键，第二份必须改名，否则整份配置非法。
+            out="$(printf '%s' "$out" | jq -c . 2>/dev/null)" || { rc=1; continue; }
+            if [[ $n -gt 1 ]]; then
+                local sfx="v6"
+                [[ "$ip" != *:* ]] && sfx="v4"
+                out="$(printf '%s' "$out" | jq -c --arg s "-$sfx" '.tag = ((.tag // "node") + $s)')"
+            fi
+        fi
+        printf '%s\n' "$out"
+    done
+    if [[ -n "$saved" ]]; then
+        OC_IP_OVERRIDE="$saved"
+    else
+        unset OC_IP_OVERRIDE
+    fi
+    return $rc
+}
+
 # _share_write <kind> <outfile|stdout|""> <content>
 # 落盘时用 umask 077 创建，保证订阅里带 uuid/私钥的文件从出生就是 600。
 _share_write() {
@@ -66,8 +132,7 @@ share_render_clash() {
     local -a frags=()
     for key in "${OC_PROTOS[@]}"; do
         db_is_installed "$key" || continue
-        fn="$(_share_fn "$key" clash)"
-        if ! frag="$("$fn")"; then
+        if ! frag="$(share_dual "$key" clash)"; then
             oc_warn "跳过 $key：Clash 片段生成失败（缺公网 IP 或状态库字段不全）"
             continue
         fi
@@ -87,8 +152,7 @@ share_render_surge() {
     local -a frags=()
     for key in "${OC_PROTOS[@]}"; do
         db_is_installed "$key" || continue
-        fn="$(_share_fn "$key" surge)"
-        if ! frag="$("$fn")"; then
+        if ! frag="$(share_dual "$key" surge)"; then
             oc_warn "跳过 $key：Surge 节点生成失败（缺公网 IP 或状态库字段不全）"
             continue
         fi
@@ -110,8 +174,7 @@ share_render_loon() {
     for key in "${OC_PROTOS[@]}"; do
         db_is_installed "$key" || continue
         [[ "$key" == "snell" ]] && continue
-        fn="$(_share_fn "$key" loon)"
-        if ! frag="$("$fn")"; then
+        if ! frag="$(share_dual "$key" loon)"; then
             oc_warn "跳过 $key：Loon 节点生成失败（缺公网 IP 或状态库字段不全）"
             continue
         fi
@@ -132,26 +195,30 @@ share_render_singbox() {
     local -a frags=() tags=()
     for key in "${OC_PROTOS[@]}"; do
         db_is_installed "$key" || continue
-        fn="$(_share_fn "$key" singbox)"
-        if ! frag="$("$fn")"; then
+        if ! frag="$(share_dual "$key" singbox)"; then
             oc_warn "跳过 $key：sing-box 片段生成失败（缺公网 IP 或状态库字段不全）"
             continue
         fi
-        # 片段必须是 JSON 对象，否则拼进去整份配置就废了
-        if ! printf '%s' "$frag" | jq -e 'type == "object"' >/dev/null 2>&1; then
-            oc_warn "跳过 $key：sing-box 片段不是合法 JSON 对象"
-            continue
-        fi
-        tag="$(printf '%s' "$frag" | jq -r '.tag // empty' 2>/dev/null)"
-        if [[ -z "$tag" ]]; then
-            tag="${OC_PROTO_TITLE[$key]:-$key}"
-            frag="$(printf '%s' "$frag" | jq -c --arg t "$tag" '.tag = $t')" || {
-                oc_warn "跳过 $key：无法补 tag"
+        # share_dual 已保证每行是单行 JSON 对象且 tag 在双栈下唯一，
+        # 这里只做合法性兜底。
+        local line
+        while IFS= read -r line; do
+            [[ -n "$line" ]] || continue
+            if ! printf '%s' "$line" | jq -e 'type == "object"' >/dev/null 2>&1; then
+                oc_warn "跳过 $key：sing-box 片段不是合法 JSON 对象"
                 continue
-            }
-        fi
-        frags+=("$frag")
-        tags+=("$tag")
+            fi
+            tag="$(printf '%s' "$line" | jq -r '.tag // empty' 2>/dev/null)"
+            if [[ -z "$tag" ]]; then
+                tag="${OC_PROTO_TITLE[$key]:-$key}"
+                line="$(printf '%s' "$line" | jq -c --arg t "$tag" '.tag = $t')" || {
+                    oc_warn "跳过 $key：无法补 tag"
+                    continue
+                }
+            fi
+            frags+=("$line")
+            tags+=("$tag")
+        done <<< "$frag"
     done
     if [[ ${#frags[@]} -eq 0 ]]; then
         oc_err "没有可用的已安装协议，无法生成 sing-box 订阅"
@@ -179,8 +246,7 @@ share_render_uri_list() {
     local out="${1:-stdout}" key fn uri body=""
     for key in "${OC_PROTOS[@]}"; do
         db_is_installed "$key" || continue
-        fn="$(_share_fn "$key" link)"
-        if ! uri="$("$fn")"; then
+        if ! uri="$(share_dual "$key" link)"; then
             oc_warn "跳过 $key：URI 生成失败（缺公网 IP 或状态库字段不全）"
             continue
         fi
@@ -267,18 +333,16 @@ share_print_info() {
         case "$f" in
             uri)
                 oc_info "URI："
-                fn="$(_share_fn "$key" link)"
-                if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
-                    printf '  %s\n' "$out"
+                if out="$(share_dual "$key" link 2>/dev/null)" && [[ -n "$out" ]]; then
+                    printf '%s\n' "$out" | sed 's/^/  /'
                 else
                     oc_warn "生成失败"
                 fi
                 ;;
             surge)
                 oc_info "Surge："
-                fn="$(_share_fn "$key" surge)"
-                if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
-                    printf '  %s\n' "$out"
+                if out="$(share_dual "$key" surge 2>/dev/null)" && [[ -n "$out" ]]; then
+                    printf '%s\n' "$out" | sed 's/^/  /'
                 else
                     oc_warn "生成失败"
                 fi
@@ -288,9 +352,8 @@ share_print_info() {
                 case "$key" in
                     snell) printf '  不支持（Loon 没有 Snell 协议）\n' ;;
                     *)
-                        fn="$(_share_fn "$key" loon)"
-                        if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
-                            printf '  %s\n' "$out"
+                        if out="$(share_dual "$key" loon 2>/dev/null)" && [[ -n "$out" ]]; then
+                            printf '%s\n' "$out" | sed 's/^/  /'
                         else
                             oc_warn "生成失败"
                         fi

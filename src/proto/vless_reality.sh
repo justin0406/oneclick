@@ -179,6 +179,11 @@ ocp_vless_reality_cfg_write() {
 # 服务器地址：db.settings.ip 优先，其次实时探测（IPv6 原样返回，由调用方决定是否加方括号）
 ocp_vless_reality_ip() {
     local ip
+    # 双栈输出时由外层设置 OC_IP_OVERRIDE 指定本次渲染用的地址
+    if [[ -n "${OC_IP_OVERRIDE:-}" ]]; then
+        printf '%s' "$OC_IP_OVERRIDE"
+        return 0
+    fi
     ip="$(db_get settings ip "")"
     [[ -z "$ip" ]] && ip="$(net_primary_ip)"
     printf '%s' "$ip"

@@ -157,6 +157,11 @@ ocp_hy2_clean_hop_rules() {
 # 探测失败返回空串，由调用方报错——绝不能兜底成 0.0.0.0 静默产出坏节点。
 ocp_hy2_ip() {
     local ip
+    # 双栈输出时由外层设置 OC_IP_OVERRIDE 指定本次渲染用的地址
+    if [[ -n "${OC_IP_OVERRIDE:-}" ]]; then
+        printf '%s' "$OC_IP_OVERRIDE"
+        return 0
+    fi
     ip="$(db_setting ip)"
     if [[ -z "$ip" ]]; then
         ip="$(net_primary_ip)"
@@ -545,7 +550,9 @@ proto_hysteria2_clash() {
     obfs="$(db_get hysteria2 obfs off)"
     obfs_pw="$(db_get hysteria2 obfs_password "")"
     hop="$(db_get hysteria2 hop "")"
-    ip="$(ocp_hy2_host)" || return 1
+    ip="$(ocp_hy2_ip)"
+    # _ip 返回空串时退出码仍是 0，必须显式判空
+    [[ -n "$ip" ]] || return 1
 
     printf '  - name: "%s"\n' "$(ocp_hy2_name)"
     printf '    type: hysteria2\n'

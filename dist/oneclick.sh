@@ -17,7 +17,7 @@ if (( BASH_VERSINFO[0] < 4 )); then
     exit 1
 fi
 
-OC_VERSION="0.7.0"
+OC_VERSION="0.8.0"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -930,6 +930,39 @@ net_primary_ip() {
 }
 
 # ===========================================================================
+# 公网 IPv6（多源兜底；无 IPv6 出口时输出空）
+# ===========================================================================
+
+_net_is_ipv6() {
+    local a="${1:-}"
+    [[ -n "$a" ]] || return 1
+    # 必须是含冒号的十六进制组；排除 IPv4 映射形式
+    [[ "$a" == *:* ]] || return 1
+    [[ "$a" =~ ^[0-9a-fA-F:]+$ ]] || return 1
+    [[ "$a" != *::ffff:* ]]
+}
+
+# 公网 IPv6 地址。优先 db 缓存，其次多源探测。
+# 探测失败返回空串——单栈机器上这是正常情况，不报错。
+net_ipv6() {
+    local ip url
+    ip="$(db_get settings ip6 "")"
+    if _net_is_ipv6 "$ip"; then
+        printf '%s' "$ip"
+        return 0
+    fi
+    command -v curl >/dev/null 2>&1 || return 0
+    for url in https://api6.ipify.org https://ipv6.icanhazip.com https://v6.ip.sb; do
+        ip="$(curl -6 -fsS --connect-timeout 5 --max-time 10 "$url" 2>/dev/null | tr -d '[:space:]')"
+        if _net_is_ipv6 "$ip"; then
+            printf '%s' "$ip"
+            return 0
+        fi
+    done
+    return 0
+}
+
+# ===========================================================================
 # 端口占用：ss -> netstat -> /proc（容器/精简系统最后兜底）
 # ===========================================================================
 
@@ -1733,6 +1766,72 @@ oc_loon_name() {
     printf '%s' "${n// /-}"
 }
 
+# ===========================================================================
+# 双栈输出
+# ===========================================================================
+#
+# 服务器同时有公网 IPv4 和 IPv6 时，每种格式各输出两份完整配置（地址不同、
+# 节点名相同，靠地址区分）；单栈则只输出一份。
+#
+# 实现方式：不改各协议渲染函数的签名，而是由 share_dual 逐个地址设置
+# OC_IP_OVERRIDE，让 *_ip 助手返回指定地址，渲染完再恢复。
+# 这样所有格式（uri/clash/surge/loon/singbox）自动获得双栈能力。
+
+# 本次输出要覆盖的地址列表（stdout 每行一个）。
+# 顺序固定 IPv4 在前，保证订阅里主节点排第一。
+share_ip_list() {
+    local v4 v6
+    # 注意：db_setting 单参数才是读取（传第二个参数会走写入分支，把 ip 清空）
+    v4="$(db_setting ip)"
+    [[ -z "$v4" ]] && v4="$(net_primary_ip)"
+    v6="$(net_ipv6)"
+    [[ -n "$v4" ]] && printf '%s\n' "$v4"
+    [[ -n "$v6" ]] && printf '%s\n' "$v6"
+    return 0
+}
+
+# share_dual <key> <format> —— 输出该协议在全部可用地址上的片段（每地址一份）
+# 单栈时就是一份，与改造前行为一致。
+share_dual() {
+    local key="$1" format="$2" fn ip out rc=0 saved="${OC_IP_OVERRIDE:-}"
+    local -a ips=()
+    fn="$(_share_fn "$key" "$format")"
+    while IFS= read -r ip; do
+        [[ -n "$ip" ]] && ips+=("$ip")
+    done < <(share_ip_list)
+    if [[ ${#ips[@]} -eq 0 ]]; then
+        # 一个地址都取不到：交给渲染函数自己报错（保持原有错误语义）
+        "$fn"
+        return $?
+    fi
+    local n=0
+    for ip in "${ips[@]}"; do
+        OC_IP_OVERRIDE="$ip"
+        if ! out="$("$fn")"; then
+            rc=1
+            continue
+        fi
+        n=$((n + 1))
+        if [[ "$format" == "singbox" ]]; then
+            # sing-box 片段必须是单行 JSON 对象（有些协议用 jq -n 输出多行缩进格式），
+            # 且双栈时 tag 是唯一键，第二份必须改名，否则整份配置非法。
+            out="$(printf '%s' "$out" | jq -c . 2>/dev/null)" || { rc=1; continue; }
+            if [[ $n -gt 1 ]]; then
+                local sfx="v6"
+                [[ "$ip" != *:* ]] && sfx="v4"
+                out="$(printf '%s' "$out" | jq -c --arg s "-$sfx" '.tag = ((.tag // "node") + $s)')"
+            fi
+        fi
+        printf '%s\n' "$out"
+    done
+    if [[ -n "$saved" ]]; then
+        OC_IP_OVERRIDE="$saved"
+    else
+        unset OC_IP_OVERRIDE
+    fi
+    return $rc
+}
+
 # _share_write <kind> <outfile|stdout|""> <content>
 # 落盘时用 umask 077 创建，保证订阅里带 uuid/私钥的文件从出生就是 600。
 _share_write() {
@@ -1778,8 +1877,7 @@ share_render_clash() {
     local -a frags=()
     for key in "${OC_PROTOS[@]}"; do
         db_is_installed "$key" || continue
-        fn="$(_share_fn "$key" clash)"
-        if ! frag="$("$fn")"; then
+        if ! frag="$(share_dual "$key" clash)"; then
             oc_warn "跳过 $key：Clash 片段生成失败（缺公网 IP 或状态库字段不全）"
             continue
         fi
@@ -1799,8 +1897,7 @@ share_render_surge() {
     local -a frags=()
     for key in "${OC_PROTOS[@]}"; do
         db_is_installed "$key" || continue
-        fn="$(_share_fn "$key" surge)"
-        if ! frag="$("$fn")"; then
+        if ! frag="$(share_dual "$key" surge)"; then
             oc_warn "跳过 $key：Surge 节点生成失败（缺公网 IP 或状态库字段不全）"
             continue
         fi
@@ -1822,8 +1919,7 @@ share_render_loon() {
     for key in "${OC_PROTOS[@]}"; do
         db_is_installed "$key" || continue
         [[ "$key" == "snell" ]] && continue
-        fn="$(_share_fn "$key" loon)"
-        if ! frag="$("$fn")"; then
+        if ! frag="$(share_dual "$key" loon)"; then
             oc_warn "跳过 $key：Loon 节点生成失败（缺公网 IP 或状态库字段不全）"
             continue
         fi
@@ -1844,26 +1940,30 @@ share_render_singbox() {
     local -a frags=() tags=()
     for key in "${OC_PROTOS[@]}"; do
         db_is_installed "$key" || continue
-        fn="$(_share_fn "$key" singbox)"
-        if ! frag="$("$fn")"; then
+        if ! frag="$(share_dual "$key" singbox)"; then
             oc_warn "跳过 $key：sing-box 片段生成失败（缺公网 IP 或状态库字段不全）"
             continue
         fi
-        # 片段必须是 JSON 对象，否则拼进去整份配置就废了
-        if ! printf '%s' "$frag" | jq -e 'type == "object"' >/dev/null 2>&1; then
-            oc_warn "跳过 $key：sing-box 片段不是合法 JSON 对象"
-            continue
-        fi
-        tag="$(printf '%s' "$frag" | jq -r '.tag // empty' 2>/dev/null)"
-        if [[ -z "$tag" ]]; then
-            tag="${OC_PROTO_TITLE[$key]:-$key}"
-            frag="$(printf '%s' "$frag" | jq -c --arg t "$tag" '.tag = $t')" || {
-                oc_warn "跳过 $key：无法补 tag"
+        # share_dual 已保证每行是单行 JSON 对象且 tag 在双栈下唯一，
+        # 这里只做合法性兜底。
+        local line
+        while IFS= read -r line; do
+            [[ -n "$line" ]] || continue
+            if ! printf '%s' "$line" | jq -e 'type == "object"' >/dev/null 2>&1; then
+                oc_warn "跳过 $key：sing-box 片段不是合法 JSON 对象"
                 continue
-            }
-        fi
-        frags+=("$frag")
-        tags+=("$tag")
+            fi
+            tag="$(printf '%s' "$line" | jq -r '.tag // empty' 2>/dev/null)"
+            if [[ -z "$tag" ]]; then
+                tag="${OC_PROTO_TITLE[$key]:-$key}"
+                line="$(printf '%s' "$line" | jq -c --arg t "$tag" '.tag = $t')" || {
+                    oc_warn "跳过 $key：无法补 tag"
+                    continue
+                }
+            fi
+            frags+=("$line")
+            tags+=("$tag")
+        done <<< "$frag"
     done
     if [[ ${#frags[@]} -eq 0 ]]; then
         oc_err "没有可用的已安装协议，无法生成 sing-box 订阅"
@@ -1891,8 +1991,7 @@ share_render_uri_list() {
     local out="${1:-stdout}" key fn uri body=""
     for key in "${OC_PROTOS[@]}"; do
         db_is_installed "$key" || continue
-        fn="$(_share_fn "$key" link)"
-        if ! uri="$("$fn")"; then
+        if ! uri="$(share_dual "$key" link)"; then
             oc_warn "跳过 $key：URI 生成失败（缺公网 IP 或状态库字段不全）"
             continue
         fi
@@ -1979,18 +2078,16 @@ share_print_info() {
         case "$f" in
             uri)
                 oc_info "URI："
-                fn="$(_share_fn "$key" link)"
-                if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
-                    printf '  %s\n' "$out"
+                if out="$(share_dual "$key" link 2>/dev/null)" && [[ -n "$out" ]]; then
+                    printf '%s\n' "$out" | sed 's/^/  /'
                 else
                     oc_warn "生成失败"
                 fi
                 ;;
             surge)
                 oc_info "Surge："
-                fn="$(_share_fn "$key" surge)"
-                if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
-                    printf '  %s\n' "$out"
+                if out="$(share_dual "$key" surge 2>/dev/null)" && [[ -n "$out" ]]; then
+                    printf '%s\n' "$out" | sed 's/^/  /'
                 else
                     oc_warn "生成失败"
                 fi
@@ -2000,9 +2097,8 @@ share_print_info() {
                 case "$key" in
                     snell) printf '  不支持（Loon 没有 Snell 协议）\n' ;;
                     *)
-                        fn="$(_share_fn "$key" loon)"
-                        if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
-                            printf '  %s\n' "$out"
+                        if out="$(share_dual "$key" loon 2>/dev/null)" && [[ -n "$out" ]]; then
+                            printf '%s\n' "$out" | sed 's/^/  /'
                         else
                             oc_warn "生成失败"
                         fi
@@ -2299,6 +2395,11 @@ ocp_vless_reality_cfg_write() {
 # 服务器地址：db.settings.ip 优先，其次实时探测（IPv6 原样返回，由调用方决定是否加方括号）
 ocp_vless_reality_ip() {
     local ip
+    # 双栈输出时由外层设置 OC_IP_OVERRIDE 指定本次渲染用的地址
+    if [[ -n "${OC_IP_OVERRIDE:-}" ]]; then
+        printf '%s' "$OC_IP_OVERRIDE"
+        return 0
+    fi
     ip="$(db_get settings ip "")"
     [[ -z "$ip" ]] && ip="$(net_primary_ip)"
     printf '%s' "$ip"
@@ -2947,6 +3048,11 @@ ocp_hy2_clean_hop_rules() {
 # 探测失败返回空串，由调用方报错——绝不能兜底成 0.0.0.0 静默产出坏节点。
 ocp_hy2_ip() {
     local ip
+    # 双栈输出时由外层设置 OC_IP_OVERRIDE 指定本次渲染用的地址
+    if [[ -n "${OC_IP_OVERRIDE:-}" ]]; then
+        printf '%s' "$OC_IP_OVERRIDE"
+        return 0
+    fi
     ip="$(db_setting ip)"
     if [[ -z "$ip" ]]; then
         ip="$(net_primary_ip)"
@@ -3335,7 +3441,9 @@ proto_hysteria2_clash() {
     obfs="$(db_get hysteria2 obfs off)"
     obfs_pw="$(db_get hysteria2 obfs_password "")"
     hop="$(db_get hysteria2 hop "")"
-    ip="$(ocp_hy2_host)" || return 1
+    ip="$(ocp_hy2_ip)"
+    # _ip 返回空串时退出码仍是 0，必须显式判空
+    [[ -n "$ip" ]] || return 1
 
     printf '  - name: "%s"\n' "$(ocp_hy2_name)"
     printf '    type: hysteria2\n'
@@ -3733,6 +3841,11 @@ ocp_snell_cfg_port() {
 
 ocp_snell_ip() {
     local ip
+    # 双栈输出时由外层设置 OC_IP_OVERRIDE 指定本次渲染用的地址
+    if [[ -n "${OC_IP_OVERRIDE:-}" ]]; then
+        printf '%s' "$OC_IP_OVERRIDE"
+        return 0
+    fi
     ip="$(db_setting ip)"
     if [[ -z "$ip" ]]; then
         ip="$(net_primary_ip)"
@@ -4158,7 +4271,8 @@ proto_snell_clash() {
     fi
     port="$(db_get snell port "")"
     psk="$(db_get snell psk "")"
-    host="$(ocp_snell_host)" || {
+    host="$(ocp_snell_ip)"
+    [[ -n "$host" ]] || {
         oc_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
         return 1
     }
@@ -4622,6 +4736,11 @@ ocp_ssrust_cfg_stls_port() {
 
 ocp_ssrust_ip() {
     local ip
+    # 双栈输出时由外层设置 OC_IP_OVERRIDE 指定本次渲染用的地址
+    if [[ -n "${OC_IP_OVERRIDE:-}" ]]; then
+        printf '%s' "$OC_IP_OVERRIDE"
+        return 0
+    fi
     ip="$(db_setting ip)"
     if [[ -z "$ip" ]]; then
         ip="$(net_primary_ip)"
@@ -5310,7 +5429,8 @@ proto_ss_rust_clash() {
     port="$(db_get ss_rust port "")"
     method="$(db_get ss_rust method "$OC_SSRUST_METHOD")"
     password="$(db_get ss_rust password "")"
-    host="$(ocp_ssrust_host)" || {
+    host="$(ocp_ssrust_ip)"
+    [[ -n "$host" ]] || {
         oc_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
         return 1
     }
@@ -5628,6 +5748,11 @@ ocp_anytls_check_config() {
 # 探测失败返回空串，由调用方报错——绝不能兜底成 0.0.0.0 静默产出坏节点。
 ocp_anytls_ip() {
     local ip
+    # 双栈输出时由外层设置 OC_IP_OVERRIDE 指定本次渲染用的地址
+    if [[ -n "${OC_IP_OVERRIDE:-}" ]]; then
+        printf '%s' "$OC_IP_OVERRIDE"
+        return 0
+    fi
     ip="$(db_setting ip)"
     if [[ -z "$ip" ]]; then
         ip="$(net_primary_ip)"
@@ -5972,7 +6097,8 @@ proto_anytls_clash() {
     port="$(db_get anytls port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
-    ip="$(ocp_anytls_host)" || return 1
+    ip="$(ocp_anytls_ip)"
+    [[ -n "$ip" ]] || return 1
 
     printf '  - name: "%s"\n' "$(ocp_anytls_name)"
     printf '    type: anytls\n'
@@ -6644,17 +6770,18 @@ cli_link() {
     local k="$OC_CLI_KEY"
     [[ -z "$k" ]] && oc_die "--link 需要协议 key"
     db_is_installed "$k" || oc_die "$(oc_title_of "$k") 未安装"
+    # 双栈服务器会输出两份（地址不同），单栈一份
     case "${OC_ARG_FORMAT:-uri}" in
-        uri|"") oc_call "$k" link ;;
-        clash)  oc_call "$k" clash ;;
-        surge) oc_call "$k" surge ;;
+        uri|"") share_dual "$k" link ;;
+        clash)  share_dual "$k" clash ;;
+        surge)  share_dual "$k" surge ;;
         loon)
             if [[ "$k" == "snell" ]]; then
                 oc_die "Loon 不支持 Snell；Snell 请用 --format surge|clash|singbox|uri"
             fi
-            oc_call "$k" loon ;;
-        singbox|sing-box) oc_call "$k" singbox ;;
-        qr) oc_call "$k" link | head -1 | while read -r l; do share_qr "$l"; done ;;
+            share_dual "$k" loon ;;
+        singbox|sing-box) share_dual "$k" singbox ;;
+        qr) share_dual "$k" link | while read -r l; do share_qr "$l"; done ;;
         *) oc_die "未知格式：$OC_ARG_FORMAT（uri|clash|surge|loon|singbox|qr）" ;;
     esac
 }

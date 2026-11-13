@@ -296,6 +296,10 @@ EOF
     write_db '{"installed":["hysteria2","anytls"],"settings":{},
       "hysteria2":{"password":"p","port":"23456","sni":"bing.com","tls_mode":"self","obfs":"off"},
       "anytls":{"password":"p","port":"23457","sni":"bing.com","tls_mode":"self"}}'
+    # 显式屏蔽两种地址探测，确保"取不到 IP"的前提成立
+    net_primary_ip() { return 0; }
+    net_ipv6() { printf ''; }
+    unset OC_IP_OVERRIDE
     local fn
     for fn in proto_hysteria2_link proto_hysteria2_clash proto_hysteria2_surge \
               proto_hysteria2_loon proto_hysteria2_singbox \
@@ -671,4 +675,90 @@ EOS
     # v5 必须有 armv7l
     [[ -n "${OC_SNELL_SHA256[snell-server-v5.0.1-linux-armv7l.zip]:-}" ]] || {
         echo "缺 v5 armv7l 哈希"; return 1; }
+}
+
+# ---------- 双栈输出：IPv4 / IPv6 各一份，单栈只一份 ----------
+
+@test "net_ipv6_validation" {
+    run _net_is_ipv6 "2a0e:97c0:3f6::1ab"
+    [ "$status" -eq 0 ] || { echo "合法 IPv6 被拒"; return 1; }
+    run _net_is_ipv6 "78.31.249.46"
+    [ "$status" -ne 0 ] || { echo "IPv4 不该被当 IPv6"; return 1; }
+    run _net_is_ipv6 "::ffff:1.2.3.4"
+    [ "$status" -ne 0 ] || { echo "IPv4-mapped 应被拒"; return 1; }
+    run _net_is_ipv6 ""
+    [ "$status" -ne 0 ] || { echo "空串应被拒"; return 1; }
+}
+
+@test "share_ip_list_dual_stack_returns_two" {
+    # 双栈：settings.ip 有 v4，net_ipv6 返回 v6
+    write_db '{"installed":[],"settings":{"ip":"1.2.3.4","ip6":"2a0e:97c0:3f6::1ab"}}'
+    run share_ip_list
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -c .)" -eq 2 ] || { echo "应输出两个地址：$output"; return 1; }
+    # IPv4 在前
+    [ "$(printf '%s\n' "$output" | head -1)" = "1.2.3.4" ] || { echo "IPv4 应在前"; return 1; }
+}
+
+@test "share_ip_list_single_stack_returns_one" {
+    # 单栈：只有 v4，且探测不到 v6
+    write_db '{"installed":[],"settings":{"ip":"1.2.3.4"}}'
+    net_ipv6() { printf ''; }
+    run share_ip_list
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -c .)" -eq 1 ] || { echo "单栈应只输出一个：$output"; return 1; }
+}
+
+@test "ip_override_wins_over_db" {
+    # OC_IP_OVERRIDE 必须优先于 db 里的 settings.ip
+    write_db '{"installed":[],"settings":{"ip":"1.2.3.4"}}'
+    OC_IP_OVERRIDE="9.9.9.9"
+    [ "$(ocp_anytls_ip)" = "9.9.9.9" ] || { echo "override 未生效：$(ocp_anytls_ip)"; return 1; }
+    unset OC_IP_OVERRIDE
+    [ "$(ocp_anytls_ip)" = "1.2.3.4" ] || { echo "恢复后应读 db：$(ocp_anytls_ip)"; return 1; }
+}
+
+@test "share_dual_emits_one_fragment_per_address" {
+    write_db '{"installed":["anytls"],"settings":{"ip":"1.2.3.4","ip6":"2a0e:97c0:3f6::1ab"},
+      "anytls":{"port":"58316","password":"pw123456789012","sni":"bing.com","tls_mode":"self"}}'
+    run share_dual anytls link
+    [ "$status" -eq 0 ] || { echo "生成失败"; return 1; }
+    [ "$(printf '%s\n' "$output" | grep -c '^anytls://')" -eq 2 ] || {
+        echo "应输出两条 URI：$output"; return 1; }
+    # IPv6 必须加方括号
+    [[ "$output" == *"@[2a0e:97c0:3f6::1ab]:"* ]] || { echo "IPv6 未加方括号"; return 1; }
+}
+
+@test "share_dual_singbox_tags_are_unique" {
+    # sing-box 的 tag 是唯一键：双栈两份必须改名
+    write_db '{"installed":["anytls"],"settings":{"ip":"1.2.3.4","ip6":"2a0e:97c0:3f6::1ab"},
+      "anytls":{"port":"58316","password":"pw123456789012","sni":"bing.com","tls_mode":"self"}}'
+    run share_dual anytls singbox
+    [ "$status" -eq 0 ] || { echo "生成失败"; return 1; }
+    local tags
+    tags="$(printf '%s\n' "$output" | jq -r .tag 2>/dev/null)"
+    [ "$(printf '%s\n' "$tags" | sort -u | wc -l | tr -d ' ')" -eq 2 ] || {
+        echo "tag 未去重：$tags"; return 1; }
+}
+
+@test "share_dual_singbox_is_single_line_json" {
+    # 有些协议用 jq -n 输出多行缩进 JSON，必须压成单行才能被订阅拼接
+    write_db '{"installed":["anytls"],"settings":{"ip":"1.2.3.4"},
+      "anytls":{"port":"58316","password":"pw123456789012","sni":"bing.com","tls_mode":"self"}}'
+    # 单栈：屏蔽真实 IPv6 探测（测试机可能有 IPv6 出口）
+    net_ipv6() { printf ''; }
+    run share_dual anytls singbox
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -c .)" -eq 1 ] || { echo "应为单行 JSON"; return 1; }
+    printf '%s' "$output" | jq -e 'type=="object"' >/dev/null || { echo "不是合法对象"; return 1; }
+}
+
+@test "clash_server_is_bare_ip_without_brackets" {
+    # Clash 的 server 是独立字段，不该带方括号（那是 URI/host 行的写法）
+    write_db '{"installed":["anytls"],"settings":{"ip":"2a0e:97c0:3f6::1ab"},
+      "anytls":{"port":"58316","password":"pw123456789012","sni":"bing.com","tls_mode":"self"}}'
+    run proto_anytls_clash
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'server: "2a0e:97c0:3f6::1ab"'* ]] || {
+        echo "Clash server 不该带方括号：$output"; return 1; }
 }

@@ -51,6 +51,39 @@ net_primary_ip() {
 }
 
 # ===========================================================================
+# 公网 IPv6（多源兜底；无 IPv6 出口时输出空）
+# ===========================================================================
+
+_net_is_ipv6() {
+    local a="${1:-}"
+    [[ -n "$a" ]] || return 1
+    # 必须是含冒号的十六进制组；排除 IPv4 映射形式
+    [[ "$a" == *:* ]] || return 1
+    [[ "$a" =~ ^[0-9a-fA-F:]+$ ]] || return 1
+    [[ "$a" != *::ffff:* ]]
+}
+
+# 公网 IPv6 地址。优先 db 缓存，其次多源探测。
+# 探测失败返回空串——单栈机器上这是正常情况，不报错。
+net_ipv6() {
+    local ip url
+    ip="$(db_get settings ip6 "")"
+    if _net_is_ipv6 "$ip"; then
+        printf '%s' "$ip"
+        return 0
+    fi
+    command -v curl >/dev/null 2>&1 || return 0
+    for url in https://api6.ipify.org https://ipv6.icanhazip.com https://v6.ip.sb; do
+        ip="$(curl -6 -fsS --connect-timeout 5 --max-time 10 "$url" 2>/dev/null | tr -d '[:space:]')"
+        if _net_is_ipv6 "$ip"; then
+            printf '%s' "$ip"
+            return 0
+        fi
+    done
+    return 0
+}
+
+# ===========================================================================
 # 端口占用：ss -> netstat -> /proc（容器/精简系统最后兜底）
 # ===========================================================================
 

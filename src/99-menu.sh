@@ -600,17 +600,18 @@ cli_link() {
     local k="$OC_CLI_KEY"
     [[ -z "$k" ]] && oc_die "--link 需要协议 key"
     db_is_installed "$k" || oc_die "$(oc_title_of "$k") 未安装"
+    # 双栈服务器会输出两份（地址不同），单栈一份
     case "${OC_ARG_FORMAT:-uri}" in
-        uri|"") oc_call "$k" link ;;
-        clash)  oc_call "$k" clash ;;
-        surge) oc_call "$k" surge ;;
+        uri|"") share_dual "$k" link ;;
+        clash)  share_dual "$k" clash ;;
+        surge)  share_dual "$k" surge ;;
         loon)
             if [[ "$k" == "snell" ]]; then
                 oc_die "Loon 不支持 Snell；Snell 请用 --format surge|clash|singbox|uri"
             fi
-            oc_call "$k" loon ;;
-        singbox|sing-box) oc_call "$k" singbox ;;
-        qr) oc_call "$k" link | head -1 | while read -r l; do share_qr "$l"; done ;;
+            share_dual "$k" loon ;;
+        singbox|sing-box) share_dual "$k" singbox ;;
+        qr) share_dual "$k" link | while read -r l; do share_qr "$l"; done ;;
         *) oc_die "未知格式：$OC_ARG_FORMAT（uri|clash|surge|loon|singbox|qr）" ;;
     esac
 }

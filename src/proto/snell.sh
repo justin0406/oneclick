@@ -297,6 +297,11 @@ ocp_snell_cfg_port() {
 
 ocp_snell_ip() {
     local ip
+    # 双栈输出时由外层设置 OC_IP_OVERRIDE 指定本次渲染用的地址
+    if [[ -n "${OC_IP_OVERRIDE:-}" ]]; then
+        printf '%s' "$OC_IP_OVERRIDE"
+        return 0
+    fi
     ip="$(db_setting ip)"
     if [[ -z "$ip" ]]; then
         ip="$(net_primary_ip)"
@@ -722,7 +727,8 @@ proto_snell_clash() {
     fi
     port="$(db_get snell port "")"
     psk="$(db_get snell psk "")"
-    host="$(ocp_snell_host)" || {
+    host="$(ocp_snell_ip)"
+    [[ -n "$host" ]] || {
         oc_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
         return 1
     }

@@ -133,6 +133,15 @@ those belong in a panel. This script's job is to install and operate one machine
 /etc/systemd/system/oneclick-<protocol>.service
 ```
 
+**Dual-stack output.** When the machine has both a public IPv4 and a public IPv6 address, every
+generated format emits **two complete nodes** — one per address — so clients can pick either family.
+Single-stack machines get one. Node names stay identical; the address tells them apart. In sing-box
+output the tags gain a `-v6` suffix on the second entry, because tag is a unique key there.
+
+Note this reports addresses, it does not verify that inbound traffic reaches them — an upstream that
+blocks IPv6 inbound still yields an IPv6 node that will not connect. Check reachability yourself if
+your provider's IPv6 is uncertain.
+
 **Dual-stack listeners.** SS-Rust, ShadowTLS, VLESS-Reality and AnyTLS bind `::` (dual-stack, IPv4
 still reachable) when the machine has an IPv6 stack, and fall back to `0.0.0.0` when it does not.
 Hysteria2 listens on both families by default; Snell stays IPv4-only.
