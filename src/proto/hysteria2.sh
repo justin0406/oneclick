@@ -256,22 +256,21 @@ proto_hysteria2_install() {
     oc_ok "二进制已安装：${OC_BIN_DIR}/hysteria"
 
     # 4. 证书（先拿证书，失败不写半截配置）
+    # 方式选择交给 cert_ensure 统一处理（编号菜单），这里不重复问，
+    # 否则会先弹一个要打英文单词的提示，再弹真正的菜单。
     mode="${OC_ARG_CERT_MODE:-}"
-    if [[ -z "$mode" ]]; then
-        mode="$(oc_ask "证书方式（self=自签 / acme=域名申请 / existing=已有证书）" self)"
-    fi
     case "$mode" in
-        self|acme|existing) ;;
+        ''|self|acme|existing) ;;
         *) oc_die "无效的证书方式：${mode}（可选 self/acme/existing）" ;;
     esac
-    sni_hint="${OC_ARG_SNI:-${OC_ARG_DOMAIN:-bing.com}}"
-    oc_info "准备证书（方式：${mode}，SNI 提示：${sni_hint}）..."
+    sni_hint="${OC_ARG_SNI:-${OC_ARG_DOMAIN:-}}"
     if ! cert_ensure "$sni_hint" "$mode"; then
         oc_die "证书准备失败，安装已中止（未写入任何配置）"
     fi
     crt_file="${CERT_PATH:-}"
     key_file="${KEY_PATH:-}"
-    sni="${SNI:-$sni_hint}"
+    sni="${SNI:-}"
+    mode="${CERT_MODE:-$mode}"
     if [[ -z "$crt_file" || -z "$key_file" || ! -f "$crt_file" || ! -f "$key_file" ]]; then
         oc_die "证书文件缺失（cert=${crt_file:-空} key=${key_file:-空}），安装已中止"
     fi
@@ -325,6 +324,10 @@ proto_hysteria2_install() {
         oc_die "服务未能启动；请检查证书路径、UDP ${port} 是否被占用后重试"
     fi
     oc_ok "服务已启动：${unit}"
+    # 登记证书使用者：ACME 续期后据此自动重启本服务
+    # 先摘掉旧登记（重装可能换了域名），再按当前域名登记
+    cert_unregister_user "$unit" 2>/dev/null || true
+    cert_register_user "$sni" "$unit" 2>/dev/null || true
 
     [[ -n "$hop" ]] && oc_ok "端口跳跃已启用：UDP ${hop}（转发规则由 hysteria 管理）"
 
@@ -397,6 +400,8 @@ proto_hysteria2_uninstall() {
     elif oc_confirm "同时删除二进制 ${OC_BIN_DIR}/hysteria？" n; then
         rm -f -- "${OC_BIN_DIR}/hysteria"
     fi
+    # 注销证书使用登记：卸载后不该再被 reloadcmd 重启
+    cert_unregister_user "$(oc_unit_name hysteria2)" 2>/dev/null || true
     db_unmark_installed hysteria2
     db_del hysteria2
     oc_ok "Hysteria2 已卸载（证书保留在 ${OC_CERT_DIR}，可复用）"

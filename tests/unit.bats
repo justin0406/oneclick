@@ -762,3 +762,84 @@ EOS
     [[ "$output" == *'server: "2a0e:97c0:3f6::1ab"'* ]] || {
         echo "Clash server 不该带方括号：$output"; return 1; }
 }
+
+# ---------- 证书共用与续期重载 ----------
+
+@test "cert_shares_by_domain_across_protocols" {
+    # 同一域名已有可用证书时，第二次调用应直接复用，不再走方式选择
+    local dir="${BATS_TEST_TMPDIR}/shared"
+    mkdir -p "$dir"
+    cert_self "shared.test.com" "$dir/shared.test.com" >/dev/null 2>&1 || skip "openssl 不可用"
+    OC_CERT_DIR="$dir"
+    OC_YES=1
+    cert_ensure "shared.test.com" "" >/dev/null 2>&1 || { echo "复用失败"; return 1; }
+    [ "$CERT_MODE" = "existing" ] || { echo "应标记为复用：$CERT_MODE"; return 1; }
+    [ "$CERT_PATH" = "$dir/shared.test.com/cert.pem" ] || { echo "路径不对：$CERT_PATH"; return 1; }
+}
+
+@test "acme_mode_does_not_reuse_selfsigned" {
+    # ACME 只认 CA 签发的证书，自签的不能被当成可复用
+    local dir="${BATS_TEST_TMPDIR}/ca"
+    mkdir -p "$dir"
+    cert_self "ca.test.com" "$dir/ca.test.com" >/dev/null 2>&1 || skip "openssl 不可用"
+    run cert_reuse "ca.test.com" "$dir/ca.test.com" 1
+    [ "$output" = "1" ] || { echo "自签不该被 ACME 复用：$output"; return 1; }
+    # 非 ACME 场景（require_ca=0）可以复用
+    run cert_reuse "ca.test.com" "$dir/ca.test.com" 0
+    [ "$output" = "0" ] || { echo "自签应可被普通模式复用：$output"; return 1; }
+}
+
+@test "cert_is_selfsigned_detects_self_signed" {
+    local dir="${BATS_TEST_TMPDIR}/ss"
+    mkdir -p "$dir"
+    cert_self "ss.test.com" "$dir" >/dev/null 2>&1 || skip "openssl 不可用"
+    run _cert_is_selfsigned "$dir/cert.pem"
+    [ "$status" -eq 0 ] || { echo "未识别出自签"; return 1; }
+}
+
+@test "cert_reload_cmd_restarts_all_registered_units" {
+    write_db '{"installed":[],"settings":{"cert_users_x.test.com":"oneclick-a,oneclick-b"}}'
+    run cert_reload_cmd "x.test.com"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"systemctl restart oneclick-a"* ]] || { echo "缺 a：$output"; return 1; }
+    [[ "$output" == *"systemctl restart oneclick-b"* ]] || { echo "缺 b：$output"; return 1; }
+}
+
+@test "cert_reload_cmd_empty_users_is_harmless" {
+    write_db '{"installed":[],"settings":{}}'
+    run cert_reload_cmd "nobody.test.com"
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ] || { echo "无使用者应输出 true：$output"; return 1; }
+}
+
+@test "cert_register_user_dedups" {
+    write_db '{"installed":[],"settings":{}}'
+    cert_register_user "d.test.com" "oneclick-a" >/dev/null 2>&1
+    cert_register_user "d.test.com" "oneclick-a" >/dev/null 2>&1
+    local v
+    v="$(db_get settings "cert_users_d.test.com" "")"
+    [ "$v" = "oneclick-a" ] || { echo "重复登记未去重：$v"; return 1; }
+    cert_register_user "d.test.com" "oneclick-b" >/dev/null 2>&1
+    v="$(db_get settings "cert_users_d.test.com" "")"
+    [ "$v" = "oneclick-a,oneclick-b" ] || { echo "追加失败：$v"; return 1; }
+}
+
+@test "cert_unregister_clears_stale_domain_entries" {
+    # 换域名后旧域名的登记必须能清掉（即使证书目录已删）
+    write_db '{"installed":[],"settings":{
+      "cert_users_old.test.com":"oneclick-x",
+      "cert_users_new.test.com":"oneclick-x,oneclick-y"}}'
+    cert_unregister_user "oneclick-x" >/dev/null 2>&1
+    [ -z "$(db_get settings "cert_users_old.test.com" "")" ] || {
+        echo "旧域名残留未清"; return 1; }
+    [ "$(db_get settings "cert_users_new.test.com" "")" = "oneclick-y" ] || {
+        echo "新域名未正确摘除：$(db_get settings "cert_users_new.test.com" "")"; return 1; }
+}
+
+@test "cert_acme_requires_explicit_domain" {
+    # ACME 不能拿占位默认值（bing.com 之类）去申请
+    OC_YES=1
+    run _cert_ensure_acme "" "${BATS_TEST_TMPDIR}/nodom"
+    [ "$status" -ne 0 ] || { echo "空域名应被拒"; return 1; }
+    [[ "$output" == *"--domain"* ]] || { echo "未提示用 --domain：$output"; return 1; }
+}

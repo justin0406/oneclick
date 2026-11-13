@@ -67,7 +67,19 @@ Adding a protocol means adding one file and registering one key.
 
 **You own the certificates.** Every TLS protocol supports three paths: `existing` (paste a certificate
 you already have), `acme` (acme.sh HTTP-01), or `self` (EC P-256 with SAN). A missing certificate never
-silently becomes a random throwaway one — installation stops at the certificate step and asks.
+silently becomes a random throwaway one — installation stops at the certificate step and asks, using a
+numbered menu rather than requiring you to type a mode name.
+
+**Certificates are shared by domain.** A certificate is stored once under `certs/<domain>/` and every
+protocol using that domain points at the same files — the second TLS protocol reuses the first one's
+certificate instead of requesting another, which also avoids Let's Encrypt's rate limit (5 per domain
+per week). acme.sh is told to `systemctl restart` every registered consumer on renewal, so a renewed
+certificate actually reaches the running services; without that hook a renewed cert sits on disk while
+the service keeps serving the expired one.
+
+ACME requires a domain **you own that already resolves to this machine** — there is no default, and the
+script checks resolution and port 80 before calling acme.sh, then prints acme.sh's real output on
+failure instead of a generic message.
 
 **Nothing outside its own scope is touched.** No firewall changes — the script never writes
 iptables / nftables / firewalld / ufw rules, so your firewall policy stays yours. No `chmod -R 777`,
