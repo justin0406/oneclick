@@ -74,15 +74,17 @@ ocp_anytls_fetch_singbox() {
     arch="$(ocp_anytls_arch)" || return 1
     asset="sing-box-${ver}-linux-${arch}.tar.gz"
     tmpdir="$(mktemp -d)" || return 1
-    # sing-box 的 release 不发布校验文件；版本是钉死的，所以用代码内静态表兜底，
-    # 表里有值就强校验，没有（例如用户自定义 OC_SINGBOX_VER）退回结构校验。
+    # 校验顺序：GitHub release API 的 digest（任意版本都能取）
+    #   → 代码内静态表（API 不可用时的离线兜底）
+    #   → 结构校验（魔数，仅挡镜像错误页）
     if ! dl_verify_fetch "https://github.com/SagerNet/sing-box/releases/download/v${ver}/${asset}" \
             "$tmpdir/sing-box.tar.gz" none "$asset"; then
         rm -rf -- "$tmpdir"
         return 1
     fi
     local known_sha
-    known_sha="${OC_SINGBOX_SHA256[$asset]:-}"
+    known_sha="$(dl_asset_digest SagerNet/sing-box "v${ver}" "$asset")"
+    [[ -n "$known_sha" ]] || known_sha="${OC_SINGBOX_SHA256[$asset]:-}"
     if [[ -n "$known_sha" ]] && ! dl_verify_sha "$tmpdir/sing-box.tar.gz" "$known_sha"; then
         rm -rf -- "$tmpdir"
         return 1
@@ -366,6 +368,86 @@ proto_anytls_uninstall() {
     db_unmark_installed anytls
     db_del anytls
     oc_ok "AnyTLS 已卸载（sing-box 二进制与证书保留，其它协议可复用）"
+}
+
+# 升级 sing-box 内核（AnyTLS 的服务端）。sing-box 有 `check` 子命令，
+# 所以可以先用新二进制校验现有配置，再重启。
+proto_anytls_upgrade() {
+    local bin cfg unit asset tag digest tmp cur newver bak now
+    oc_require_root
+    [[ -n "${OC_ARCH:-}" ]] || os_detect
+    if ! db_is_installed anytls; then
+        oc_err "AnyTLS 未安装；请用 --install anytls"
+        return 1
+    fi
+    bin="$(ocp_anytls_bin)"
+    cfg="$(ocp_anytls_cfg)"
+    unit="$(oc_unit_name anytls)"
+    case "${OC_ARCH:-}" in
+        amd64|arm64|armv7l) ;;
+        *) oc_err "当前架构 ${OC_ARCH} 无 sing-box 构建"; return 1 ;;
+    esac
+    local arch; arch="$(ocp_anytls_arch)" || return 1
+
+    cur="$(oc_bin_version "$bin" || true)"
+    tag="$(dl_latest_tag SagerNet/sing-box)"
+    [[ -n "$tag" ]] || { oc_err "取不到 sing-box 最新版本号（网络或 API 限流）"; return 1; }
+    newver="${tag#v}"
+    if [[ -n "$cur" && "$cur" == "$newver" ]]; then
+        oc_ok "sing-box 已是最新：$cur"
+        return 0
+    fi
+    oc_info "sing-box：${cur:-未知} → ${newver}"
+
+    asset="sing-box-${newver}-linux-${arch}.tar.gz"
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/oneclick-sb-up.XXXXXX")" || return 1
+    digest="$(dl_asset_digest SagerNet/sing-box "$tag" "$asset")"
+    if [[ -n "$digest" ]]; then
+        dl_verify_fetch "https://github.com/SagerNet/sing-box/releases/download/$tag/$asset" \
+            "$tmp/sb.tar.gz" none "$asset" || { rm -rf "$tmp"; return 1; }
+        dl_verify_sha "$tmp/sb.tar.gz" "$digest" || { rm -rf "$tmp"; return 1; }
+    else
+        dl_verify_fetch "https://github.com/SagerNet/sing-box/releases/download/$tag/$asset" \
+            "$tmp/sb.tar.gz" none "$asset" || { rm -rf "$tmp"; return 1; }
+    fi
+    if ! dl_untar "$tmp/sb.tar.gz" "$tmp/x"; then
+        rm -rf "$tmp"; oc_err "sing-box 解压失败"; return 1
+    fi
+    local newbin
+    newbin="$(find "$tmp/x" -type f -name sing-box 2>/dev/null | head -1)"
+    if [[ -z "$newbin" || ! -f "$newbin" ]]; then
+        rm -rf "$tmp"; oc_err "压缩包内未找到 sing-box 可执行文件"; return 1
+    fi
+
+    bak="$(oc_upgrade_begin "$bin")" || { rm -rf "$tmp"; return 1; }
+    if ! oc_upgrade_install "$newbin" "$bin"; then
+        rm -rf "$tmp"; oc_upgrade_rollback "$bak" "$bin"; return 1
+    fi
+    rm -rf "$tmp"
+
+    # 关卡一：新版本能否解析现有配置
+    if ! "$bin" check -c "$cfg" >/dev/null 2>&1; then
+        oc_err "新版本 sing-box 无法通过现有配置校验，正在回滚："
+        "$bin" check -c "$cfg" 2>&1 | tail -n 10 >&2
+        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_err "已回滚到 ${cur:-旧版本}"
+        return 1
+    fi
+
+    # 关卡二：重启后存活
+    if ! oc_upgrade_restart "$unit"; then
+        oc_err "新版本 sing-box 启动失败，正在回滚："
+        svc_logs "$unit" 20 >&2
+        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_err "已回滚到 ${cur:-旧版本}"
+        return 1
+    fi
+
+    oc_upgrade_commit "$bak"
+    db_set anytls singbox_ver "$newver"
+    now="$(oc_bin_version "$bin" || true)"
+    _oc_upgrade_report "sing-box" "$cur" "$now"
+    oc_ok "AnyTLS 内核已升级并重启"
 }
 
 proto_anytls_status() {

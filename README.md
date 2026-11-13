@@ -98,6 +98,17 @@ they may be shared with a panel or another script, and deleting them silently br
 prompt, or use `oneclick --purge` to remove everything it ever created — that one requires typing
 `PURGE` to confirm.
 
+**Kernels upgrade in place, safely.** `oneclick --upgrade <key|all>` (or *Node management → kernel
+versions*) replaces a kernel binary without touching your config, port or credentials. Every upgrade
+backs up the old binary, verifies the download against the GitHub release digest, checks that the new
+version still accepts your existing config (where the kernel offers a check subcommand), then restarts
+and confirms the service is alive. Any failure restores the backup and restarts the old version — the
+backup is kept until the new one is proven running, because for kernels without a config check
+(Hysteria2, ssserver) a failed start is the only signal that something broke.
+
+Snell is the exception: `dl.nssurge.com` publishes no version index, so `--upgrade snell` needs an
+explicit `--kernel-version X.Y.Z` instead of discovering the latest.
+
 **Single user by design.** No multi-user accounts, traffic accounting, expiry dates or Telegram bot —
 those belong in a panel. This script's job is to install and operate one machine's proxies well.
 

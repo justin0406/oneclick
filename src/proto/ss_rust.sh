@@ -759,6 +759,113 @@ proto_ss_rust_uninstall() {
     oc_ok "SS-Rust 已卸载"
 }
 
+# 升级 SS-Rust 内核。ssserver 与 shadow-tls 各自独立升级：
+# ssserver 是本体，shadow-tls 只在启用伪装时存在。
+# ssserver 没有配置自检命令，靠重启存活验证；备份留到确认之后。
+proto_ss_rust_upgrade() {
+    local bin stbin cfg stcfg unit stl_unit tar_arch tag digest tmp cur newver bak now
+    local shadowtls
+    oc_require_root
+    [[ -n "${OC_ARCH:-}" ]] || os_detect
+    if ! db_is_installed ss_rust; then
+        oc_err "SS-Rust 未安装；请用 --install ss_rust"
+        return 1
+    fi
+    bin="$(ocp_ssrust_bin)"
+    stbin="$(ocp_ssrust_stls_bin)"
+    cfg="$(ocp_ssrust_cfg)"
+    stcfg="$(ocp_ssrust_stls_cfg)"
+    unit="$(ocp_ssrust_unit)"
+    stl_unit="$(ocp_ssrust_stls_unit)"
+    shadowtls="$(db_get ss_rust shadowtls "no")"
+    tar_arch="$(ocp_ssrust_arch)" || { oc_err "当前架构 ${OC_ARCH} 无 SS-Rust 构建"; return 1; }
+
+    # ---- 1. ssserver ----
+    cur="$(oc_bin_version "$bin" || true)"
+    tag="$(dl_latest_tag shadowsocks/shadowsocks-rust)"
+    [[ -n "$tag" ]] || { oc_err "取不到 shadowsocks-rust 最新版本号"; return 1; }
+    newver="${tag#v}"
+    if [[ -n "$cur" && "$cur" == "$newver" ]]; then
+        oc_ok "ssserver 已是最新：$cur"
+    else
+        oc_info "ssserver：${cur:-未知} → ${newver}"
+        local asset="shadowsocks-v${newver}.${tar_arch}.tar.xz"
+        tmp="$(mktemp -d "${TMPDIR:-/tmp}/oneclick-ss-up.XXXXXX")" || return 1
+        digest="$(dl_asset_digest shadowsocks/shadowsocks-rust "$tag" "$asset")"
+        if [[ -n "$digest" ]]; then
+            dl_verify_fetch "https://github.com/shadowsocks/shadowsocks-rust/releases/download/$tag/$asset" \
+                "$tmp/ss.tar.xz" none "$asset" || { rm -rf "$tmp"; return 1; }
+            dl_verify_sha "$tmp/ss.tar.xz" "$digest" || { rm -rf "$tmp"; return 1; }
+        else
+            dl_verify_fetch "https://github.com/shadowsocks/shadowsocks-rust/releases/download/$tag/$asset" \
+                "$tmp/ss.tar.xz" plain "$asset" || { rm -rf "$tmp"; return 1; }
+        fi
+        ocp_ssrust_ensure_xz || { rm -rf "$tmp"; return 1; }
+        if ! dl_untar "$tmp/ss.tar.xz" "$tmp/x" || [[ ! -f "$tmp/x/ssserver" ]]; then
+            rm -rf "$tmp"; oc_err "压缩包内未找到 ssserver"; return 1
+        fi
+        bak="$(oc_upgrade_begin "$bin")" || { rm -rf "$tmp"; return 1; }
+        if ! oc_upgrade_install "$tmp/x/ssserver" "$bin"; then
+            rm -rf "$tmp"; oc_upgrade_rollback "$bak" "$bin"; return 1
+        fi
+        rm -rf "$tmp"
+        if ! oc_upgrade_restart "$unit"; then
+            oc_err "新版本 ssserver 启动失败，正在回滚："
+            svc_logs "$unit" 20 >&2
+            oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+            oc_err "已回滚到 ${cur:-旧版本}"
+            return 1
+        fi
+        oc_upgrade_commit "$bak"
+        db_set ss_rust version "$newver"
+        now="$(oc_bin_version "$bin" || true)"
+        _oc_upgrade_report "ssserver" "$cur" "$now"
+    fi
+
+    # ---- 2. shadow-tls（仅启用时）----
+    if [[ "$shadowtls" == "yes" && -x "$stbin" ]]; then
+        local stcur sttag stnew stasset sttmp stbak stnow
+        stcur="$(oc_bin_version "$stbin" || true)"
+        sttag="$(dl_latest_tag ihciah/shadow-tls)"
+        if [[ -z "$sttag" ]]; then
+            oc_warn "取不到 shadow-tls 最新版本号，跳过其升级"
+        else
+            stnew="${sttag#v}"
+            if [[ -n "$stcur" && "$stcur" == "$stnew" ]]; then
+                oc_ok "shadow-tls 已是最新：$stcur"
+            else
+                oc_info "shadow-tls：${stcur:-未知} → ${stnew}"
+                local sarch; sarch="$(ocp_ssrust_stls_arch)" || return 1
+                stasset="shadow-tls-${sarch}"
+                sttmp="$(mktemp -d "${TMPDIR:-/tmp}/oneclick-stls-up.XXXXXX")" || return 1
+                local stdigest; stdigest="$(dl_asset_digest ihciah/shadow-tls "$sttag" "$stasset")"
+                dl_verify_fetch "https://github.com/ihciah/shadow-tls/releases/download/$sttag/$stasset" \
+                    "$sttmp/shadow-tls" none "$stasset" || { rm -rf "$sttmp"; return 1; }
+                if [[ -n "$stdigest" ]]; then
+                    dl_verify_sha "$sttmp/shadow-tls" "$stdigest" || { rm -rf "$sttmp"; return 1; }
+                fi
+                stbak="$(oc_upgrade_begin "$stbin")" || { rm -rf "$sttmp"; return 1; }
+                if ! oc_upgrade_install "$sttmp/shadow-tls" "$stbin"; then
+                    rm -rf "$sttmp"; oc_upgrade_rollback "$stbak" "$stbin"; return 1
+                fi
+                rm -rf "$sttmp"
+                if ! oc_upgrade_restart "$stl_unit"; then
+                    oc_err "新版本 shadow-tls 启动失败，正在回滚："
+                    svc_logs "$stl_unit" 20 >&2
+                    oc_upgrade_rollback "$stbak" "$stbin" && svc_restart "$stl_unit"
+                    oc_err "已回滚到 ${stcur:-旧版本}"
+                    return 1
+                fi
+                oc_upgrade_commit "$stbak"
+                stnow="$(oc_bin_version "$stbin" || true)"
+                _oc_upgrade_report "shadow-tls" "$stcur" "$stnow"
+            fi
+        fi
+    fi
+
+    oc_ok "SS-Rust 内核升级流程完成"
+}
+
 proto_ss_rust_status() {
     local unit port pid st
     unit="$(ocp_ssrust_unit)"

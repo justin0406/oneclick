@@ -76,6 +76,28 @@ dl_latest_ver() {
     printf '%s' "${t#v}"
 }
 
+# dl_asset_digest <owner/repo> <tag> <asset-name> -> 输出该资产的 sha256（小写十六进制）
+#
+# GitHub 的 release API 为每个资产提供 digest 字段（形如 "sha256:<hex>"），
+# 这样任意版本都能动态取到官方哈希，不必在代码里维护"版本 → 哈希"静态表。
+# tag 传 latest 时先解析成真实 tag。取不到（老资产无 digest / API 限流）输出空。
+dl_asset_digest() {
+    local repo="$1" tag="$2" asset="$3" api prefix json
+    [[ "$tag" == "latest" ]] && tag="$(dl_latest_tag "$repo")"
+    [[ -n "$tag" ]] || return 0
+    api="https://api.github.com/repos/$repo/releases/tags/$tag"
+    prefix="${OC_GH_PROXY:-$(db_get settings gh_proxy "")}"
+    json="$(curl -fsSL --connect-timeout 10 --max-time 30 "$api" 2>/dev/null)"
+    if [[ -z "$json" && -n "$prefix" ]]; then
+        json="$(curl -fsSL --connect-timeout 10 --max-time 30 "${prefix%/}/$api" 2>/dev/null)"
+    fi
+    [[ -n "$json" ]] || return 0
+    printf '%s' "$json" | jq -r --arg a "$asset" '
+        (.assets[]? | select(.name == $a) | .digest // empty)
+        | sub("^sha256:"; "")
+    ' 2>/dev/null | head -n1
+}
+
 # dl_gh <owner/repo> <tag|latest> <asset> <out> —— 便捷封装，不做校验。
 # 注意：安装内核不要用它，改用 dl_verify_fetch（会校验上游 sidecar 或静态哈希表）。
 dl_gh() {

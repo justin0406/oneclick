@@ -478,16 +478,36 @@ oc_self_update() {
     rm -f "$newf" "$tmp"
 }
 
+# 内核版本一览 + 升级入口
 _up_kernels() {
     local -a bins=(xray hysteria snell-server ssserver shadow-tls sing-box)
     local b v p
+    oc_title "内核版本"
     for b in "${bins[@]}"; do
         p="$OC_BIN_DIR/$b"
         [[ -x "$p" ]] || p="$(command -v "$b" 2>/dev/null || true)"
         [[ -n "$p" ]] || continue
-        v="$("$p" --version 2>/dev/null | head -1 || true)"
-        [[ -z "$v" ]] && v="$("$p" version 2>/dev/null | head -1 || true)"
-        printf '  %-18s %s\n' "$b" "${v:-已安装}"
+        v="$(oc_bin_version "$p" || true)"
+        printf '  %-18s %s\n' "$b" "${v:-已安装（版本未知）}"
+    done
+
+    # 只列出已安装协议的升级项
+    local -a keys=()
+    local k
+    for k in "${OC_PROTOS[@]}"; do
+        db_is_installed "$k" && keys+=("$k")
+    done
+    if [[ ${#keys[@]} -eq 0 ]]; then
+        oc_warn "还没有安装任何协议，无可升级项"
+        return 0
+    fi
+    printf '\n'
+    if ! oc_confirm "检查并升级已安装协议的内核？（会重启服务）" n; then
+        return 0
+    fi
+    for k in "${keys[@]}"; do
+        oc_title "升级内核：$(oc_title_of "$k")"
+        oc_call "$k" upgrade || oc_warn "$(oc_title_of "$k") 升级未完成"
     done
 }
 
@@ -549,6 +569,23 @@ cli_status() {
     done
 }
 
+# --upgrade <key|all> [--version X.Y.Z]
+# 只升已安装的协议；未安装的跳过并提示。
+_cli_upgrade() {
+    local k rc=0
+    if [[ "$OC_CLI_KEY" == "all" ]]; then
+        for k in "${OC_PROTOS[@]}"; do
+            db_is_installed "$k" || continue
+            oc_title "升级内核：$(oc_title_of "$k")"
+            oc_call "$k" upgrade || rc=1
+        done
+        ((rc == 0)) && oc_ok "全部已安装协议的内核升级流程结束"
+        return "$rc"
+    fi
+    db_is_installed "$OC_CLI_KEY" || oc_die "$(oc_title_of "$OC_CLI_KEY") 未安装（升级只对已装协议有效）"
+    oc_call "$OC_CLI_KEY" upgrade ${OC_ARG_VERSION:+"$OC_ARG_VERSION"}
+}
+
 cli_link() {
     local k="$OC_CLI_KEY"
     [[ -z "$k" ]] && oc_die "--link 需要协议 key"
@@ -575,6 +612,7 @@ cli_run() {
         uninstall) db_is_installed "$OC_CLI_KEY" || oc_die "$(oc_title_of "$OC_CLI_KEY") 未安装"
                    oc_call "$OC_CLI_KEY" uninstall ;;
         regen)     oc_call "$OC_CLI_KEY" regen ;;
+        upgrade)   _cli_upgrade ;;
         link)      cli_link ;;
         status)    cli_status ;;
         list)      cli_list ;;
@@ -599,6 +637,8 @@ OneClick 一键多协议代理安装器
   oneclick --install ss_rust [--method chacha20-ietf-poly1305]   老客户端兼容加密方式
   oneclick --uninstall <key> [--yes]
   oneclick --regen <key>
+  oneclick --upgrade <key|all>                 升级已装协议的内核（备份/自检/失败回滚）
+  oneclick --upgrade snell --kernel-version X.Y.Z  snell 无版本接口，需显式指定
   oneclick --link <key> [--format uri|clash|surge|loon|singbox|qr]
   oneclick --status [--format json]
   oneclick --list
@@ -615,8 +655,8 @@ EOF
 oc_parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --install|--uninstall|--regen|--link)
-                [[ -n "${2:-}" ]] || oc_die "$1 需要协议 key"
+            --install|--uninstall|--regen|--link|--upgrade)
+                [[ -n "${2:-}" ]] || oc_die "$1 需要协议 key（或 all）"
                 OC_CLI_ACTION="${1#--}"
                 OC_CLI_KEY="$2"; shift 2 ;;
             --status|--list|--cert-status|--sub|--purge|--version|--help)
@@ -627,12 +667,17 @@ oc_parse_args() {
             --method) [[ -n "${2:-}" ]] || oc_die "--method 需要值"; OC_ARG_METHOD="$2"; shift 2 ;;
             --cert-mode) [[ -n "${2:-}" ]] || oc_die "--cert-mode 需要值"; OC_ARG_CERT_MODE="$2"; shift 2 ;;
             --format) [[ -n "${2:-}" ]] || oc_die "--format 需要值"; OC_ARG_FORMAT="$2"; shift 2 ;;
+            --kernel-version) [[ -n "${2:-}" ]] || oc_die "--kernel-version 需要版本号"; OC_ARG_VERSION="$2"; shift 2 ;;
             -y|--yes) OC_YES=1; shift ;;
             *) oc_die "未知参数：$1（--help 查看用法）" ;;
         esac
     done
     if [[ -n "$OC_CLI_KEY" ]]; then
-        oc_key_valid "$OC_CLI_KEY" || oc_die "未知协议 key：$OC_CLI_KEY（可用：${OC_PROTOS[*]}）"
+        if [[ "$OC_CLI_KEY" == "all" ]]; then
+            [[ "$OC_CLI_ACTION" == "upgrade" ]] || oc_die "只有 --upgrade 支持 all"
+        else
+            oc_key_valid "$OC_CLI_KEY" || oc_die "未知协议 key：$OC_CLI_KEY（可用：${OC_PROTOS[*]} 或 all）"
+        fi
     fi
 }
 

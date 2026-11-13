@@ -104,6 +104,17 @@ ocp_vless_reality_dest() {
     VLR_DEST="$dest"
 }
 
+# OC_ARCH -> Xray release 资产名（安装与升级共用）
+ocp_vless_reality_asset() {
+    case "${OC_ARCH:-}" in
+        amd64)  printf 'Xray-linux-64.zip' ;;
+        arm64)  printf 'Xray-linux-arm64-v8a.zip' ;;
+        armv7l) printf 'Xray-linux-arm32-v7a.zip' ;;
+        i386)   printf 'Xray-linux-32.zip' ;;
+        *)      return 1 ;;
+    esac
+}
+
 # 写 inbounds[0] + 基本 direct/block 出站；600；先写临时文件再 mv。
 # 第 7 个参数可指定目标文件（regen 用它先写 staging 验证，验不过就不动在线配置）。
 ocp_vless_reality_cfg_write() {
@@ -231,13 +242,7 @@ proto_vless_reality_install() {
         ver="$("$bin" version 2>/dev/null | head -n1 | awk '{print $2}')"
         oc_ok "复用已安装 xray：$("$bin" version 2>/dev/null | head -n1)"
     else
-        case "$OC_ARCH" in
-            amd64)  asset="Xray-linux-64.zip" ;;
-            arm64)  asset="Xray-linux-arm64-v8a.zip" ;;
-            armv7l) asset="Xray-linux-arm32-v7a.zip" ;;
-            i386)   asset="Xray-linux-32.zip" ;;
-            *)      oc_die "Xray 官方未提供该架构的预编译包：$OC_ARCH" ;;
-        esac
+        asset="$(ocp_vless_reality_asset)" || oc_die "Xray 官方未提供该架构的预编译包：$OC_ARCH"
         ver="$(dl_latest_tag XTLS/Xray-core)"
         [[ -z "$ver" ]] && oc_die "获取 Xray-core 版本失败（网络或 GitHub API 限流），可先在设置里配 gh_proxy"
         oc_info "下载 Xray-core $ver（$asset）..."
@@ -371,6 +376,77 @@ proto_vless_reality_uninstall() {
     db_del "$key"
     db_unmark_installed "$key"
     oc_ok "VLESS-Reality 已卸载"
+}
+
+# 升级 xray 内核。只换二进制，不动配置。
+# 两道关卡：换完先用新二进制跑 `xray run -test` 校验现有配置；重启后确认存活。
+# 任一关失败都还原旧版本并重启，备份保留到确认存活为止。
+proto_vless_reality_upgrade() {
+    local key="vless_reality" bin cfg unit asset tag digest tmp cur newver bak now
+    oc_require_root
+    os_detect
+    if ! db_is_installed "$key"; then
+        oc_err "VLESS-Reality 未安装；请用 --install vless_reality"
+        return 1
+    fi
+    bin="$OC_BIN_DIR/xray"
+    cfg="$(oc_proto_dir "$key")/config.json"
+    unit="$(oc_unit_name "$key")"
+    asset="$(ocp_vless_reality_asset)" || { oc_err "当前架构 ${OC_ARCH} 无 Xray 预编译包"; return 1; }
+
+    cur="$(oc_bin_version "$bin" || true)"
+    tag="$(dl_latest_tag XTLS/Xray-core)"
+    [[ -n "$tag" ]] || { oc_err "取不到 Xray-core 最新版本号（网络或 API 限流）"; return 1; }
+    newver="${tag#v}"
+    if [[ -n "$cur" && "$cur" == "$newver" ]]; then
+        oc_ok "xray 已是最新：$cur"
+        return 0
+    fi
+    oc_info "xray：${cur:-未知} → ${newver}"
+
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/oneclick-xray-up.XXXXXX")" || return 1
+    digest="$(dl_asset_digest XTLS/Xray-core "$tag" "$asset")"
+    if [[ -n "$digest" ]]; then
+        dl_verify_fetch "https://github.com/XTLS/Xray-core/releases/download/$tag/$asset" \
+            "$tmp/xray.zip" none "$asset" || { rm -rf "$tmp"; return 1; }
+        dl_verify_sha "$tmp/xray.zip" "$digest" || { rm -rf "$tmp"; return 1; }
+    else
+        dl_verify_fetch "https://github.com/XTLS/Xray-core/releases/download/$tag/$asset" \
+            "$tmp/xray.zip" dgst "$asset" || { rm -rf "$tmp"; return 1; }
+    fi
+    if ! dl_unzip "$tmp/xray.zip" "$tmp/x" || [[ ! -f "$tmp/x/xray" ]]; then
+        rm -rf "$tmp"; oc_err "解压后未找到 xray 可执行文件"; return 1
+    fi
+
+    bak="$(oc_upgrade_begin "$bin")" || { rm -rf "$tmp"; return 1; }
+    if ! oc_upgrade_install "$tmp/x/xray" "$bin"; then
+        rm -rf "$tmp"; oc_upgrade_rollback "$bak" "$bin"
+        return 1
+    fi
+    rm -rf "$tmp"
+
+    # 关卡一：新二进制能否解析现有配置
+    if ! "$bin" run -test -c "$cfg" >/dev/null 2>&1; then
+        oc_err "新版本 xray 无法通过现有配置自检，正在回滚："
+        "$bin" run -test -c "$cfg" 2>&1 | tail -n 10 >&2
+        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_err "已回滚到 ${cur:-旧版本}"
+        return 1
+    fi
+
+    # 关卡二：重启后是否存活
+    if ! oc_upgrade_restart "$unit"; then
+        oc_err "新版本 xray 启动失败，正在回滚："
+        svc_logs "$unit" 20 >&2
+        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_err "已回滚到 ${cur:-旧版本}"
+        return 1
+    fi
+
+    oc_upgrade_commit "$bak"
+    now="$(oc_bin_version "$bin" || true)"
+    _oc_upgrade_report "xray" "$cur" "$now"
+    oc_ok "VLESS-Reality 内核已升级并重启"
 }
 
 proto_vless_reality_status() {

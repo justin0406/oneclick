@@ -397,6 +397,62 @@ proto_hysteria2_uninstall() {
     oc_ok "Hysteria2 已卸载（证书保留在 ${OC_CERT_DIR}，可复用）"
 }
 
+# 升级 hysteria 内核。hysteria 没有配置自检命令，唯一的不兼容信号就是
+# "换完起不来"，所以备份必须留到重启确认存活之后。
+proto_hysteria2_upgrade() {
+    local bin cfg unit asset tag digest tmp cur newver bak now
+    oc_require_root
+    [[ -n "${OC_ARCH:-}" ]] || os_detect
+    if ! db_is_installed hysteria2; then
+        oc_err "Hysteria2 未安装；请用 --install hysteria2"
+        return 1
+    fi
+    bin="${OC_BIN_DIR}/hysteria"
+    cfg="$(ocp_hy2_cfg)"
+    unit="$(oc_unit_name hysteria2)"
+    asset="hysteria-linux-$(ocp_hy2_arch)" || { oc_err "当前架构 ${OC_ARCH} 无 Hysteria2 构建"; return 1; }
+
+    cur="$(oc_bin_version "$bin" || true)"
+    tag="$(dl_latest_tag apernet/hysteria)"
+    [[ -n "$tag" ]] || { oc_err "取不到 Hysteria 最新版本号（网络或 API 限流）"; return 1; }
+    newver="${tag##*/}"; newver="${newver#v}"
+    if [[ -n "$cur" && "$cur" == "$newver" ]]; then
+        oc_ok "hysteria 已是最新：$cur"
+        return 0
+    fi
+    oc_info "hysteria：${cur:-未知} → ${newver}"
+
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/oneclick-hy-up.XXXXXX")" || return 1
+    digest="$(dl_asset_digest apernet/hysteria "$tag" "$asset")"
+    if [[ -n "$digest" ]]; then
+        dl_verify_fetch "https://github.com/apernet/hysteria/releases/download/$tag/$asset" \
+            "$tmp/hysteria" none "$asset" || { rm -rf "$tmp"; return 1; }
+        dl_verify_sha "$tmp/hysteria" "$digest" || { rm -rf "$tmp"; return 1; }
+    else
+        dl_verify_fetch "https://github.com/apernet/hysteria/releases/download/$tag/$asset" \
+            "$tmp/hysteria" hashlist "$asset" || { rm -rf "$tmp"; return 1; }
+    fi
+
+    bak="$(oc_upgrade_begin "$bin")" || { rm -rf "$tmp"; return 1; }
+    if ! oc_upgrade_install "$tmp/hysteria" "$bin"; then
+        rm -rf "$tmp"; oc_upgrade_rollback "$bak" "$bin"; return 1
+    fi
+    rm -rf "$tmp"
+
+    if ! oc_upgrade_restart "$unit"; then
+        oc_err "新版本 hysteria 启动失败（配置可能不兼容），正在回滚："
+        svc_logs "$unit" 20 >&2
+        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_err "已回滚到 ${cur:-旧版本}"
+        return 1
+    fi
+
+    oc_upgrade_commit "$bak"
+    now="$(oc_bin_version "$bin" || true)"
+    _oc_upgrade_report "hysteria" "$cur" "$now"
+    oc_ok "Hysteria2 内核已升级并重启"
+}
+
 proto_hysteria2_status() {
     local unit port pid
     unit="$(oc_unit_name hysteria2)"

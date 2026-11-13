@@ -241,6 +241,8 @@ proto_snell_install() {
             rm -rf -- "$tmp"
             oc_die "Snell 下载失败（dl.nssurge.com 可能限流或不可达）；可稍后重试或手动放到 $bin"
         fi
+        # 静态表兜底：dl.nssurge.com 不提供任何校验文件或 API，
+        # 只能对代码内置的版本做哈希校验；其它版本仅结构校验。
         if ! dl_verify_sha "$tmp/snell.zip" "${OC_SNELL_SHA256[$asset]:-}"; then
             rm -rf -- "$tmp"
             oc_die "Snell 校验失败（版本 v${OC_SNELL_VER} 的资产哈希与代码内记录不符）"
@@ -353,6 +355,72 @@ proto_snell_uninstall() {
     db_del snell
     db_unmark_installed snell
     oc_ok "Snell v6 已卸载"
+}
+
+# 升级 snell-server。
+# 注意：dl.nssurge.com 没有版本发现接口，所以无法"查最新"——只能指定目标版本。
+# 不给参数时列出代码内已知版本，由用户决定是否升。
+proto_snell_upgrade() {
+    local bin cfg unit asset cur target tmp bak now
+    local target_ver="${1:-}"
+    oc_require_root
+    [[ -n "${OC_ARCH:-}" ]] || os_detect
+    if ! db_is_installed snell; then
+        oc_err "Snell 未安装；请用 --install snell"
+        return 1
+    fi
+    bin="$(ocp_snell_bin)"
+    cfg="$(ocp_snell_cfg)"
+    unit="$(ocp_snell_unit)"
+    cur="$(oc_bin_version "$bin" || true)"
+
+    # snell 闭源且无版本接口：目标版本必须显式给出
+    if [[ -z "$target_ver" ]]; then
+        oc_warn "dl.nssurge.com 不提供版本列表，无法自动查询最新版"
+        oc_info "当前版本：${cur:-未知}；代码内置版本：${OC_SNELL_VER}"
+        oc_info "如需升级到其它版本：oneclick --upgrade snell --kernel-version <x.y.z>"
+        return 0
+    fi
+    target="$target_ver"
+    if [[ -n "$cur" && "$cur" == "$target" ]]; then
+        oc_ok "snell-server 已是 ${cur}"
+        return 0
+    fi
+    oc_info "snell-server：${cur:-未知} → ${target}"
+
+    asset="snell-server-v${target}-linux-$(ocp_snell_dl_arch "${OC_ARCH:-}")" || return 1
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/oneclick-snell-up.XXXXXX")" || return 1
+    # snell 无官方校验文件：只能做结构校验（zip 魔数）
+    if ! dl_verify_fetch "https://dl.nssurge.com/snell/${asset}.zip" "$tmp/snell.zip" none "${asset}.zip"; then
+        rm -rf "$tmp"; return 1
+    fi
+    if ! dl_unzip "$tmp/snell.zip" "$tmp/x" || [[ ! -f "$tmp/x/snell-server" ]]; then
+        rm -rf "$tmp"; oc_err "压缩包内未找到 snell-server"; return 1
+    fi
+    # 新版本必须能跑起来（架构/依赖不匹配在这里暴露）
+    if ! oc_bin_runnable "$tmp/x/snell-server"; then
+        rm -rf "$tmp"; oc_err "下载的 snell-server 无法执行（版本不存在或架构不匹配）"; return 1
+    fi
+
+    bak="$(oc_upgrade_begin "$bin")" || { rm -rf "$tmp"; return 1; }
+    if ! oc_upgrade_install "$tmp/x/snell-server" "$bin"; then
+        rm -rf "$tmp"; oc_upgrade_rollback "$bak" "$bin"; return 1
+    fi
+    rm -rf "$tmp"
+
+    if ! oc_upgrade_restart "$unit"; then
+        oc_err "新版本 snell-server 启动失败，正在回滚："
+        svc_logs "$unit" 20 >&2
+        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_err "已回滚到 ${cur:-旧版本}"
+        return 1
+    fi
+
+    oc_upgrade_commit "$bak"
+    db_set snell version "$target"
+    now="$(oc_bin_version "$bin" || true)"
+    _oc_upgrade_report "snell-server" "$cur" "$now"
+    oc_ok "Snell v6 内核已升级并重启"
 }
 
 proto_snell_status() {

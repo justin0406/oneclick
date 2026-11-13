@@ -17,7 +17,7 @@ if (( BASH_VERSINFO[0] < 4 )); then
     exit 1
 fi
 
-OC_VERSION="0.5.0"
+OC_VERSION="0.6.0"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -47,6 +47,7 @@ OC_ARG_SNI=""
 OC_ARG_METHOD=""
 OC_ARG_CERT_MODE=""
 OC_ARG_FORMAT=""
+OC_ARG_VERSION=""
 OC_CLI_ACTION=""
 OC_CLI_KEY=""
 # 原始参数（自动更新后 exec 自身时复用）
@@ -690,6 +691,28 @@ dl_latest_ver() {
     local t
     t="$(dl_latest_tag "$1")"
     printf '%s' "${t#v}"
+}
+
+# dl_asset_digest <owner/repo> <tag> <asset-name> -> 输出该资产的 sha256（小写十六进制）
+#
+# GitHub 的 release API 为每个资产提供 digest 字段（形如 "sha256:<hex>"），
+# 这样任意版本都能动态取到官方哈希，不必在代码里维护"版本 → 哈希"静态表。
+# tag 传 latest 时先解析成真实 tag。取不到（老资产无 digest / API 限流）输出空。
+dl_asset_digest() {
+    local repo="$1" tag="$2" asset="$3" api prefix json
+    [[ "$tag" == "latest" ]] && tag="$(dl_latest_tag "$repo")"
+    [[ -n "$tag" ]] || return 0
+    api="https://api.github.com/repos/$repo/releases/tags/$tag"
+    prefix="${OC_GH_PROXY:-$(db_get settings gh_proxy "")}"
+    json="$(curl -fsSL --connect-timeout 10 --max-time 30 "$api" 2>/dev/null)"
+    if [[ -z "$json" && -n "$prefix" ]]; then
+        json="$(curl -fsSL --connect-timeout 10 --max-time 30 "${prefix%/}/$api" 2>/dev/null)"
+    fi
+    [[ -n "$json" ]] || return 0
+    printf '%s' "$json" | jq -r --arg a "$asset" '
+        (.assets[]? | select(.name == $a) | .digest // empty)
+        | sub("^sha256:"; "")
+    ' 2>/dev/null | head -n1
 }
 
 # dl_gh <owner/repo> <tag|latest> <asset> <out> —— 便捷封装，不做校验。
@@ -1993,6 +2016,106 @@ share_print_info() {
 }
 
 
+# ===== src/lib/upgrade.sh =====
+# lib/upgrade.sh —— 内核升级的通用骨架
+#
+# 设计原则（与安装路径区分开）：
+#   - 安装只负责"装到能跑"，升级要负责"换了还能跑，跑不了就退回去"。
+#   - 流程：下载到临时位置 → 校验 → 备份旧二进制 → 替换 → 配置自检（若有）
+#     → 重启并确认存活 → 失败则还原并重启旧版 → 成功才删备份。
+#   - 备份必须留到"重启后确认存活"为止：hysteria / ssserver 没有配置自检命令，
+#     唯一能发现不兼容的时刻就是启动失败，那时备份若已删就没法回滚。
+#   - 升级不改配置、不换端口/凭据，只换二进制。
+
+# 已装二进制能否正常执行（不同内核参数不同，逐个试）
+oc_bin_runnable() {
+    local bin="$1"
+    [[ -x "$bin" ]] || return 1
+    "$bin" version >/dev/null 2>&1 && return 0
+    "$bin" --version >/dev/null 2>&1 && return 0
+    "$bin" -V >/dev/null 2>&1 && return 0
+    "$bin" -h >/dev/null 2>&1 && return 0
+    return 1
+}
+
+# 从二进制的版本输出里抓第一个形如 x.y.z 的版本号
+# （各内核输出格式差异大：hysteria 带 ASCII art，snell 带时间戳）
+oc_bin_version() {
+    local bin="$1" out=""
+    [[ -x "$bin" ]] || return 1
+    # 三种参数都试并合并输出：不同内核支持的子命令不同，且不支持的参数会
+    # 打印错误文本而不是空（如 ssserver version 报 unexpected argument），
+    # 逐次判断"是否为空"会被错误文本骗过去，拿不到真正的版本号。
+    out+="$("$bin" version 2>&1 || true)"$'\n'
+    out+="$("$bin" --version 2>&1 || true)"$'\n'
+    out+="$("$bin" -V 2>&1 || true)"$'\n'
+    # 只认 v 前缀或独立的 x.y.z，避开时间戳里的小数（如 34.504121）
+    printf '%s' "$out" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+|[0-9]+\.[0-9]+\.[0-9]+' \
+        | head -n1 | sed 's/^v//'
+}
+
+# 升级会话：备份路径由调用方持有，成功收尾时删除
+# 用法：
+#   bak="$(oc_upgrade_begin "$target")" || return 1
+#   oc_upgrade_install "$newbin" "$target" || { 失败已自动还原; return 1; }
+#   oc_upgrade_commit "$bak"          # 确认新版本可用后调用
+#   oc_upgrade_rollback "$bak" "$target"
+
+# oc_upgrade_begin <target> -> stdout 输出备份路径
+oc_upgrade_begin() {
+    local target="$1" bak
+    [[ -x "$target" ]] || { oc_err "目标二进制不存在：$target"; return 1; }
+    bak="${target}.bak.$$"
+    if ! cp -f -- "$target" "$bak" 2>/dev/null; then
+        oc_err "备份旧二进制失败：$target"
+        return 1
+    fi
+    printf '%s' "$bak"
+}
+
+# oc_upgrade_install <newbin> <target>：替换，失败自动还原
+oc_upgrade_install() {
+    local newbin="$1" target="$2"
+    if ! install -m 755 "$newbin" "$target" 2>/dev/null; then
+        oc_err "替换二进制失败：$target"
+        return 1
+    fi
+    return 0
+}
+
+# oc_upgrade_commit <bak>：删除备份，升级完成
+oc_upgrade_commit() {
+    local bak="$1"
+    [[ -n "$bak" && -f "$bak" ]] && rm -f -- "$bak"
+    return 0
+}
+
+# oc_upgrade_rollback <bak> <target>：还原并清理
+oc_upgrade_rollback() {
+    local bak="$1" target="$2"
+    if [[ -n "$bak" && -f "$bak" ]]; then
+        if mv -f -- "$bak" "$target" 2>/dev/null; then
+            chmod 755 "$target" 2>/dev/null || true
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# oc_upgrade_restart <unit>：重启并确认存活
+oc_upgrade_restart() {
+    local unit="$1"
+    svc_restart "$unit"
+    sleep 2
+    svc_is_active "$unit"
+}
+
+# 打印升级前后版本对照
+_oc_upgrade_report() {
+    local name="$1" old="$2" new="$3"
+    oc_kv "$name" "${old:-未知} → ${new:-未知}"
+}
+
 # ===== src/proto/vless_reality.sh =====
 # proto/vless_reality.sh —— VLESS + REALITY（Xray-core 官方内核）
 # REALITY 不落地证书：借用目标站真实 TLS 握手，不需要证书库参与；
@@ -2098,6 +2221,17 @@ ocp_vless_reality_dest() {
     [[ "$sni" == *.* ]] || oc_die "域名格式不合法（需要含点）：$sni"
     VLR_SNI="$sni"
     VLR_DEST="$dest"
+}
+
+# OC_ARCH -> Xray release 资产名（安装与升级共用）
+ocp_vless_reality_asset() {
+    case "${OC_ARCH:-}" in
+        amd64)  printf 'Xray-linux-64.zip' ;;
+        arm64)  printf 'Xray-linux-arm64-v8a.zip' ;;
+        armv7l) printf 'Xray-linux-arm32-v7a.zip' ;;
+        i386)   printf 'Xray-linux-32.zip' ;;
+        *)      return 1 ;;
+    esac
 }
 
 # 写 inbounds[0] + 基本 direct/block 出站；600；先写临时文件再 mv。
@@ -2227,13 +2361,7 @@ proto_vless_reality_install() {
         ver="$("$bin" version 2>/dev/null | head -n1 | awk '{print $2}')"
         oc_ok "复用已安装 xray：$("$bin" version 2>/dev/null | head -n1)"
     else
-        case "$OC_ARCH" in
-            amd64)  asset="Xray-linux-64.zip" ;;
-            arm64)  asset="Xray-linux-arm64-v8a.zip" ;;
-            armv7l) asset="Xray-linux-arm32-v7a.zip" ;;
-            i386)   asset="Xray-linux-32.zip" ;;
-            *)      oc_die "Xray 官方未提供该架构的预编译包：$OC_ARCH" ;;
-        esac
+        asset="$(ocp_vless_reality_asset)" || oc_die "Xray 官方未提供该架构的预编译包：$OC_ARCH"
         ver="$(dl_latest_tag XTLS/Xray-core)"
         [[ -z "$ver" ]] && oc_die "获取 Xray-core 版本失败（网络或 GitHub API 限流），可先在设置里配 gh_proxy"
         oc_info "下载 Xray-core $ver（$asset）..."
@@ -2367,6 +2495,77 @@ proto_vless_reality_uninstall() {
     db_del "$key"
     db_unmark_installed "$key"
     oc_ok "VLESS-Reality 已卸载"
+}
+
+# 升级 xray 内核。只换二进制，不动配置。
+# 两道关卡：换完先用新二进制跑 `xray run -test` 校验现有配置；重启后确认存活。
+# 任一关失败都还原旧版本并重启，备份保留到确认存活为止。
+proto_vless_reality_upgrade() {
+    local key="vless_reality" bin cfg unit asset tag digest tmp cur newver bak now
+    oc_require_root
+    os_detect
+    if ! db_is_installed "$key"; then
+        oc_err "VLESS-Reality 未安装；请用 --install vless_reality"
+        return 1
+    fi
+    bin="$OC_BIN_DIR/xray"
+    cfg="$(oc_proto_dir "$key")/config.json"
+    unit="$(oc_unit_name "$key")"
+    asset="$(ocp_vless_reality_asset)" || { oc_err "当前架构 ${OC_ARCH} 无 Xray 预编译包"; return 1; }
+
+    cur="$(oc_bin_version "$bin" || true)"
+    tag="$(dl_latest_tag XTLS/Xray-core)"
+    [[ -n "$tag" ]] || { oc_err "取不到 Xray-core 最新版本号（网络或 API 限流）"; return 1; }
+    newver="${tag#v}"
+    if [[ -n "$cur" && "$cur" == "$newver" ]]; then
+        oc_ok "xray 已是最新：$cur"
+        return 0
+    fi
+    oc_info "xray：${cur:-未知} → ${newver}"
+
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/oneclick-xray-up.XXXXXX")" || return 1
+    digest="$(dl_asset_digest XTLS/Xray-core "$tag" "$asset")"
+    if [[ -n "$digest" ]]; then
+        dl_verify_fetch "https://github.com/XTLS/Xray-core/releases/download/$tag/$asset" \
+            "$tmp/xray.zip" none "$asset" || { rm -rf "$tmp"; return 1; }
+        dl_verify_sha "$tmp/xray.zip" "$digest" || { rm -rf "$tmp"; return 1; }
+    else
+        dl_verify_fetch "https://github.com/XTLS/Xray-core/releases/download/$tag/$asset" \
+            "$tmp/xray.zip" dgst "$asset" || { rm -rf "$tmp"; return 1; }
+    fi
+    if ! dl_unzip "$tmp/xray.zip" "$tmp/x" || [[ ! -f "$tmp/x/xray" ]]; then
+        rm -rf "$tmp"; oc_err "解压后未找到 xray 可执行文件"; return 1
+    fi
+
+    bak="$(oc_upgrade_begin "$bin")" || { rm -rf "$tmp"; return 1; }
+    if ! oc_upgrade_install "$tmp/x/xray" "$bin"; then
+        rm -rf "$tmp"; oc_upgrade_rollback "$bak" "$bin"
+        return 1
+    fi
+    rm -rf "$tmp"
+
+    # 关卡一：新二进制能否解析现有配置
+    if ! "$bin" run -test -c "$cfg" >/dev/null 2>&1; then
+        oc_err "新版本 xray 无法通过现有配置自检，正在回滚："
+        "$bin" run -test -c "$cfg" 2>&1 | tail -n 10 >&2
+        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_err "已回滚到 ${cur:-旧版本}"
+        return 1
+    fi
+
+    # 关卡二：重启后是否存活
+    if ! oc_upgrade_restart "$unit"; then
+        oc_err "新版本 xray 启动失败，正在回滚："
+        svc_logs "$unit" 20 >&2
+        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_err "已回滚到 ${cur:-旧版本}"
+        return 1
+    fi
+
+    oc_upgrade_commit "$bak"
+    now="$(oc_bin_version "$bin" || true)"
+    _oc_upgrade_report "xray" "$cur" "$now"
+    oc_ok "VLESS-Reality 内核已升级并重启"
 }
 
 proto_vless_reality_status() {
@@ -2987,6 +3186,62 @@ proto_hysteria2_uninstall() {
     oc_ok "Hysteria2 已卸载（证书保留在 ${OC_CERT_DIR}，可复用）"
 }
 
+# 升级 hysteria 内核。hysteria 没有配置自检命令，唯一的不兼容信号就是
+# "换完起不来"，所以备份必须留到重启确认存活之后。
+proto_hysteria2_upgrade() {
+    local bin cfg unit asset tag digest tmp cur newver bak now
+    oc_require_root
+    [[ -n "${OC_ARCH:-}" ]] || os_detect
+    if ! db_is_installed hysteria2; then
+        oc_err "Hysteria2 未安装；请用 --install hysteria2"
+        return 1
+    fi
+    bin="${OC_BIN_DIR}/hysteria"
+    cfg="$(ocp_hy2_cfg)"
+    unit="$(oc_unit_name hysteria2)"
+    asset="hysteria-linux-$(ocp_hy2_arch)" || { oc_err "当前架构 ${OC_ARCH} 无 Hysteria2 构建"; return 1; }
+
+    cur="$(oc_bin_version "$bin" || true)"
+    tag="$(dl_latest_tag apernet/hysteria)"
+    [[ -n "$tag" ]] || { oc_err "取不到 Hysteria 最新版本号（网络或 API 限流）"; return 1; }
+    newver="${tag##*/}"; newver="${newver#v}"
+    if [[ -n "$cur" && "$cur" == "$newver" ]]; then
+        oc_ok "hysteria 已是最新：$cur"
+        return 0
+    fi
+    oc_info "hysteria：${cur:-未知} → ${newver}"
+
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/oneclick-hy-up.XXXXXX")" || return 1
+    digest="$(dl_asset_digest apernet/hysteria "$tag" "$asset")"
+    if [[ -n "$digest" ]]; then
+        dl_verify_fetch "https://github.com/apernet/hysteria/releases/download/$tag/$asset" \
+            "$tmp/hysteria" none "$asset" || { rm -rf "$tmp"; return 1; }
+        dl_verify_sha "$tmp/hysteria" "$digest" || { rm -rf "$tmp"; return 1; }
+    else
+        dl_verify_fetch "https://github.com/apernet/hysteria/releases/download/$tag/$asset" \
+            "$tmp/hysteria" hashlist "$asset" || { rm -rf "$tmp"; return 1; }
+    fi
+
+    bak="$(oc_upgrade_begin "$bin")" || { rm -rf "$tmp"; return 1; }
+    if ! oc_upgrade_install "$tmp/hysteria" "$bin"; then
+        rm -rf "$tmp"; oc_upgrade_rollback "$bak" "$bin"; return 1
+    fi
+    rm -rf "$tmp"
+
+    if ! oc_upgrade_restart "$unit"; then
+        oc_err "新版本 hysteria 启动失败（配置可能不兼容），正在回滚："
+        svc_logs "$unit" 20 >&2
+        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_err "已回滚到 ${cur:-旧版本}"
+        return 1
+    fi
+
+    oc_upgrade_commit "$bak"
+    now="$(oc_bin_version "$bin" || true)"
+    _oc_upgrade_report "hysteria" "$cur" "$now"
+    oc_ok "Hysteria2 内核已升级并重启"
+}
+
 proto_hysteria2_status() {
     local unit port pid
     unit="$(oc_unit_name hysteria2)"
@@ -3421,6 +3676,8 @@ proto_snell_install() {
             rm -rf -- "$tmp"
             oc_die "Snell 下载失败（dl.nssurge.com 可能限流或不可达）；可稍后重试或手动放到 $bin"
         fi
+        # 静态表兜底：dl.nssurge.com 不提供任何校验文件或 API，
+        # 只能对代码内置的版本做哈希校验；其它版本仅结构校验。
         if ! dl_verify_sha "$tmp/snell.zip" "${OC_SNELL_SHA256[$asset]:-}"; then
             rm -rf -- "$tmp"
             oc_die "Snell 校验失败（版本 v${OC_SNELL_VER} 的资产哈希与代码内记录不符）"
@@ -3533,6 +3790,72 @@ proto_snell_uninstall() {
     db_del snell
     db_unmark_installed snell
     oc_ok "Snell v6 已卸载"
+}
+
+# 升级 snell-server。
+# 注意：dl.nssurge.com 没有版本发现接口，所以无法"查最新"——只能指定目标版本。
+# 不给参数时列出代码内已知版本，由用户决定是否升。
+proto_snell_upgrade() {
+    local bin cfg unit asset cur target tmp bak now
+    local target_ver="${1:-}"
+    oc_require_root
+    [[ -n "${OC_ARCH:-}" ]] || os_detect
+    if ! db_is_installed snell; then
+        oc_err "Snell 未安装；请用 --install snell"
+        return 1
+    fi
+    bin="$(ocp_snell_bin)"
+    cfg="$(ocp_snell_cfg)"
+    unit="$(ocp_snell_unit)"
+    cur="$(oc_bin_version "$bin" || true)"
+
+    # snell 闭源且无版本接口：目标版本必须显式给出
+    if [[ -z "$target_ver" ]]; then
+        oc_warn "dl.nssurge.com 不提供版本列表，无法自动查询最新版"
+        oc_info "当前版本：${cur:-未知}；代码内置版本：${OC_SNELL_VER}"
+        oc_info "如需升级到其它版本：oneclick --upgrade snell --kernel-version <x.y.z>"
+        return 0
+    fi
+    target="$target_ver"
+    if [[ -n "$cur" && "$cur" == "$target" ]]; then
+        oc_ok "snell-server 已是 ${cur}"
+        return 0
+    fi
+    oc_info "snell-server：${cur:-未知} → ${target}"
+
+    asset="snell-server-v${target}-linux-$(ocp_snell_dl_arch "${OC_ARCH:-}")" || return 1
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/oneclick-snell-up.XXXXXX")" || return 1
+    # snell 无官方校验文件：只能做结构校验（zip 魔数）
+    if ! dl_verify_fetch "https://dl.nssurge.com/snell/${asset}.zip" "$tmp/snell.zip" none "${asset}.zip"; then
+        rm -rf "$tmp"; return 1
+    fi
+    if ! dl_unzip "$tmp/snell.zip" "$tmp/x" || [[ ! -f "$tmp/x/snell-server" ]]; then
+        rm -rf "$tmp"; oc_err "压缩包内未找到 snell-server"; return 1
+    fi
+    # 新版本必须能跑起来（架构/依赖不匹配在这里暴露）
+    if ! oc_bin_runnable "$tmp/x/snell-server"; then
+        rm -rf "$tmp"; oc_err "下载的 snell-server 无法执行（版本不存在或架构不匹配）"; return 1
+    fi
+
+    bak="$(oc_upgrade_begin "$bin")" || { rm -rf "$tmp"; return 1; }
+    if ! oc_upgrade_install "$tmp/x/snell-server" "$bin"; then
+        rm -rf "$tmp"; oc_upgrade_rollback "$bak" "$bin"; return 1
+    fi
+    rm -rf "$tmp"
+
+    if ! oc_upgrade_restart "$unit"; then
+        oc_err "新版本 snell-server 启动失败，正在回滚："
+        svc_logs "$unit" 20 >&2
+        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_err "已回滚到 ${cur:-旧版本}"
+        return 1
+    fi
+
+    oc_upgrade_commit "$bak"
+    db_set snell version "$target"
+    now="$(oc_bin_version "$bin" || true)"
+    _oc_upgrade_report "snell-server" "$cur" "$now"
+    oc_ok "Snell v6 内核已升级并重启"
 }
 
 proto_snell_status() {
@@ -4468,6 +4791,113 @@ proto_ss_rust_uninstall() {
     oc_ok "SS-Rust 已卸载"
 }
 
+# 升级 SS-Rust 内核。ssserver 与 shadow-tls 各自独立升级：
+# ssserver 是本体，shadow-tls 只在启用伪装时存在。
+# ssserver 没有配置自检命令，靠重启存活验证；备份留到确认之后。
+proto_ss_rust_upgrade() {
+    local bin stbin cfg stcfg unit stl_unit tar_arch tag digest tmp cur newver bak now
+    local shadowtls
+    oc_require_root
+    [[ -n "${OC_ARCH:-}" ]] || os_detect
+    if ! db_is_installed ss_rust; then
+        oc_err "SS-Rust 未安装；请用 --install ss_rust"
+        return 1
+    fi
+    bin="$(ocp_ssrust_bin)"
+    stbin="$(ocp_ssrust_stls_bin)"
+    cfg="$(ocp_ssrust_cfg)"
+    stcfg="$(ocp_ssrust_stls_cfg)"
+    unit="$(ocp_ssrust_unit)"
+    stl_unit="$(ocp_ssrust_stls_unit)"
+    shadowtls="$(db_get ss_rust shadowtls "no")"
+    tar_arch="$(ocp_ssrust_arch)" || { oc_err "当前架构 ${OC_ARCH} 无 SS-Rust 构建"; return 1; }
+
+    # ---- 1. ssserver ----
+    cur="$(oc_bin_version "$bin" || true)"
+    tag="$(dl_latest_tag shadowsocks/shadowsocks-rust)"
+    [[ -n "$tag" ]] || { oc_err "取不到 shadowsocks-rust 最新版本号"; return 1; }
+    newver="${tag#v}"
+    if [[ -n "$cur" && "$cur" == "$newver" ]]; then
+        oc_ok "ssserver 已是最新：$cur"
+    else
+        oc_info "ssserver：${cur:-未知} → ${newver}"
+        local asset="shadowsocks-v${newver}.${tar_arch}.tar.xz"
+        tmp="$(mktemp -d "${TMPDIR:-/tmp}/oneclick-ss-up.XXXXXX")" || return 1
+        digest="$(dl_asset_digest shadowsocks/shadowsocks-rust "$tag" "$asset")"
+        if [[ -n "$digest" ]]; then
+            dl_verify_fetch "https://github.com/shadowsocks/shadowsocks-rust/releases/download/$tag/$asset" \
+                "$tmp/ss.tar.xz" none "$asset" || { rm -rf "$tmp"; return 1; }
+            dl_verify_sha "$tmp/ss.tar.xz" "$digest" || { rm -rf "$tmp"; return 1; }
+        else
+            dl_verify_fetch "https://github.com/shadowsocks/shadowsocks-rust/releases/download/$tag/$asset" \
+                "$tmp/ss.tar.xz" plain "$asset" || { rm -rf "$tmp"; return 1; }
+        fi
+        ocp_ssrust_ensure_xz || { rm -rf "$tmp"; return 1; }
+        if ! dl_untar "$tmp/ss.tar.xz" "$tmp/x" || [[ ! -f "$tmp/x/ssserver" ]]; then
+            rm -rf "$tmp"; oc_err "压缩包内未找到 ssserver"; return 1
+        fi
+        bak="$(oc_upgrade_begin "$bin")" || { rm -rf "$tmp"; return 1; }
+        if ! oc_upgrade_install "$tmp/x/ssserver" "$bin"; then
+            rm -rf "$tmp"; oc_upgrade_rollback "$bak" "$bin"; return 1
+        fi
+        rm -rf "$tmp"
+        if ! oc_upgrade_restart "$unit"; then
+            oc_err "新版本 ssserver 启动失败，正在回滚："
+            svc_logs "$unit" 20 >&2
+            oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+            oc_err "已回滚到 ${cur:-旧版本}"
+            return 1
+        fi
+        oc_upgrade_commit "$bak"
+        db_set ss_rust version "$newver"
+        now="$(oc_bin_version "$bin" || true)"
+        _oc_upgrade_report "ssserver" "$cur" "$now"
+    fi
+
+    # ---- 2. shadow-tls（仅启用时）----
+    if [[ "$shadowtls" == "yes" && -x "$stbin" ]]; then
+        local stcur sttag stnew stasset sttmp stbak stnow
+        stcur="$(oc_bin_version "$stbin" || true)"
+        sttag="$(dl_latest_tag ihciah/shadow-tls)"
+        if [[ -z "$sttag" ]]; then
+            oc_warn "取不到 shadow-tls 最新版本号，跳过其升级"
+        else
+            stnew="${sttag#v}"
+            if [[ -n "$stcur" && "$stcur" == "$stnew" ]]; then
+                oc_ok "shadow-tls 已是最新：$stcur"
+            else
+                oc_info "shadow-tls：${stcur:-未知} → ${stnew}"
+                local sarch; sarch="$(ocp_ssrust_stls_arch)" || return 1
+                stasset="shadow-tls-${sarch}"
+                sttmp="$(mktemp -d "${TMPDIR:-/tmp}/oneclick-stls-up.XXXXXX")" || return 1
+                local stdigest; stdigest="$(dl_asset_digest ihciah/shadow-tls "$sttag" "$stasset")"
+                dl_verify_fetch "https://github.com/ihciah/shadow-tls/releases/download/$sttag/$stasset" \
+                    "$sttmp/shadow-tls" none "$stasset" || { rm -rf "$sttmp"; return 1; }
+                if [[ -n "$stdigest" ]]; then
+                    dl_verify_sha "$sttmp/shadow-tls" "$stdigest" || { rm -rf "$sttmp"; return 1; }
+                fi
+                stbak="$(oc_upgrade_begin "$stbin")" || { rm -rf "$sttmp"; return 1; }
+                if ! oc_upgrade_install "$sttmp/shadow-tls" "$stbin"; then
+                    rm -rf "$sttmp"; oc_upgrade_rollback "$stbak" "$stbin"; return 1
+                fi
+                rm -rf "$sttmp"
+                if ! oc_upgrade_restart "$stl_unit"; then
+                    oc_err "新版本 shadow-tls 启动失败，正在回滚："
+                    svc_logs "$stl_unit" 20 >&2
+                    oc_upgrade_rollback "$stbak" "$stbin" && svc_restart "$stl_unit"
+                    oc_err "已回滚到 ${stcur:-旧版本}"
+                    return 1
+                fi
+                oc_upgrade_commit "$stbak"
+                stnow="$(oc_bin_version "$stbin" || true)"
+                _oc_upgrade_report "shadow-tls" "$stcur" "$stnow"
+            fi
+        fi
+    fi
+
+    oc_ok "SS-Rust 内核升级流程完成"
+}
+
 proto_ss_rust_status() {
     local unit port pid st
     unit="$(ocp_ssrust_unit)"
@@ -4864,15 +5294,17 @@ ocp_anytls_fetch_singbox() {
     arch="$(ocp_anytls_arch)" || return 1
     asset="sing-box-${ver}-linux-${arch}.tar.gz"
     tmpdir="$(mktemp -d)" || return 1
-    # sing-box 的 release 不发布校验文件；版本是钉死的，所以用代码内静态表兜底，
-    # 表里有值就强校验，没有（例如用户自定义 OC_SINGBOX_VER）退回结构校验。
+    # 校验顺序：GitHub release API 的 digest（任意版本都能取）
+    #   → 代码内静态表（API 不可用时的离线兜底）
+    #   → 结构校验（魔数，仅挡镜像错误页）
     if ! dl_verify_fetch "https://github.com/SagerNet/sing-box/releases/download/v${ver}/${asset}" \
             "$tmpdir/sing-box.tar.gz" none "$asset"; then
         rm -rf -- "$tmpdir"
         return 1
     fi
     local known_sha
-    known_sha="${OC_SINGBOX_SHA256[$asset]:-}"
+    known_sha="$(dl_asset_digest SagerNet/sing-box "v${ver}" "$asset")"
+    [[ -n "$known_sha" ]] || known_sha="${OC_SINGBOX_SHA256[$asset]:-}"
     if [[ -n "$known_sha" ]] && ! dl_verify_sha "$tmpdir/sing-box.tar.gz" "$known_sha"; then
         rm -rf -- "$tmpdir"
         return 1
@@ -5156,6 +5588,86 @@ proto_anytls_uninstall() {
     db_unmark_installed anytls
     db_del anytls
     oc_ok "AnyTLS 已卸载（sing-box 二进制与证书保留，其它协议可复用）"
+}
+
+# 升级 sing-box 内核（AnyTLS 的服务端）。sing-box 有 `check` 子命令，
+# 所以可以先用新二进制校验现有配置，再重启。
+proto_anytls_upgrade() {
+    local bin cfg unit asset tag digest tmp cur newver bak now
+    oc_require_root
+    [[ -n "${OC_ARCH:-}" ]] || os_detect
+    if ! db_is_installed anytls; then
+        oc_err "AnyTLS 未安装；请用 --install anytls"
+        return 1
+    fi
+    bin="$(ocp_anytls_bin)"
+    cfg="$(ocp_anytls_cfg)"
+    unit="$(oc_unit_name anytls)"
+    case "${OC_ARCH:-}" in
+        amd64|arm64|armv7l) ;;
+        *) oc_err "当前架构 ${OC_ARCH} 无 sing-box 构建"; return 1 ;;
+    esac
+    local arch; arch="$(ocp_anytls_arch)" || return 1
+
+    cur="$(oc_bin_version "$bin" || true)"
+    tag="$(dl_latest_tag SagerNet/sing-box)"
+    [[ -n "$tag" ]] || { oc_err "取不到 sing-box 最新版本号（网络或 API 限流）"; return 1; }
+    newver="${tag#v}"
+    if [[ -n "$cur" && "$cur" == "$newver" ]]; then
+        oc_ok "sing-box 已是最新：$cur"
+        return 0
+    fi
+    oc_info "sing-box：${cur:-未知} → ${newver}"
+
+    asset="sing-box-${newver}-linux-${arch}.tar.gz"
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/oneclick-sb-up.XXXXXX")" || return 1
+    digest="$(dl_asset_digest SagerNet/sing-box "$tag" "$asset")"
+    if [[ -n "$digest" ]]; then
+        dl_verify_fetch "https://github.com/SagerNet/sing-box/releases/download/$tag/$asset" \
+            "$tmp/sb.tar.gz" none "$asset" || { rm -rf "$tmp"; return 1; }
+        dl_verify_sha "$tmp/sb.tar.gz" "$digest" || { rm -rf "$tmp"; return 1; }
+    else
+        dl_verify_fetch "https://github.com/SagerNet/sing-box/releases/download/$tag/$asset" \
+            "$tmp/sb.tar.gz" none "$asset" || { rm -rf "$tmp"; return 1; }
+    fi
+    if ! dl_untar "$tmp/sb.tar.gz" "$tmp/x"; then
+        rm -rf "$tmp"; oc_err "sing-box 解压失败"; return 1
+    fi
+    local newbin
+    newbin="$(find "$tmp/x" -type f -name sing-box 2>/dev/null | head -1)"
+    if [[ -z "$newbin" || ! -f "$newbin" ]]; then
+        rm -rf "$tmp"; oc_err "压缩包内未找到 sing-box 可执行文件"; return 1
+    fi
+
+    bak="$(oc_upgrade_begin "$bin")" || { rm -rf "$tmp"; return 1; }
+    if ! oc_upgrade_install "$newbin" "$bin"; then
+        rm -rf "$tmp"; oc_upgrade_rollback "$bak" "$bin"; return 1
+    fi
+    rm -rf "$tmp"
+
+    # 关卡一：新版本能否解析现有配置
+    if ! "$bin" check -c "$cfg" >/dev/null 2>&1; then
+        oc_err "新版本 sing-box 无法通过现有配置校验，正在回滚："
+        "$bin" check -c "$cfg" 2>&1 | tail -n 10 >&2
+        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_err "已回滚到 ${cur:-旧版本}"
+        return 1
+    fi
+
+    # 关卡二：重启后存活
+    if ! oc_upgrade_restart "$unit"; then
+        oc_err "新版本 sing-box 启动失败，正在回滚："
+        svc_logs "$unit" 20 >&2
+        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_err "已回滚到 ${cur:-旧版本}"
+        return 1
+    fi
+
+    oc_upgrade_commit "$bak"
+    db_set anytls singbox_ver "$newver"
+    now="$(oc_bin_version "$bin" || true)"
+    _oc_upgrade_report "sing-box" "$cur" "$now"
+    oc_ok "AnyTLS 内核已升级并重启"
 }
 
 proto_anytls_status() {
@@ -5782,16 +6294,36 @@ oc_self_update() {
     rm -f "$newf" "$tmp"
 }
 
+# 内核版本一览 + 升级入口
 _up_kernels() {
     local -a bins=(xray hysteria snell-server ssserver shadow-tls sing-box)
     local b v p
+    oc_title "内核版本"
     for b in "${bins[@]}"; do
         p="$OC_BIN_DIR/$b"
         [[ -x "$p" ]] || p="$(command -v "$b" 2>/dev/null || true)"
         [[ -n "$p" ]] || continue
-        v="$("$p" --version 2>/dev/null | head -1 || true)"
-        [[ -z "$v" ]] && v="$("$p" version 2>/dev/null | head -1 || true)"
-        printf '  %-18s %s\n' "$b" "${v:-已安装}"
+        v="$(oc_bin_version "$p" || true)"
+        printf '  %-18s %s\n' "$b" "${v:-已安装（版本未知）}"
+    done
+
+    # 只列出已安装协议的升级项
+    local -a keys=()
+    local k
+    for k in "${OC_PROTOS[@]}"; do
+        db_is_installed "$k" && keys+=("$k")
+    done
+    if [[ ${#keys[@]} -eq 0 ]]; then
+        oc_warn "还没有安装任何协议，无可升级项"
+        return 0
+    fi
+    printf '\n'
+    if ! oc_confirm "检查并升级已安装协议的内核？（会重启服务）" n; then
+        return 0
+    fi
+    for k in "${keys[@]}"; do
+        oc_title "升级内核：$(oc_title_of "$k")"
+        oc_call "$k" upgrade || oc_warn "$(oc_title_of "$k") 升级未完成"
     done
 }
 
@@ -5853,6 +6385,23 @@ cli_status() {
     done
 }
 
+# --upgrade <key|all> [--version X.Y.Z]
+# 只升已安装的协议；未安装的跳过并提示。
+_cli_upgrade() {
+    local k rc=0
+    if [[ "$OC_CLI_KEY" == "all" ]]; then
+        for k in "${OC_PROTOS[@]}"; do
+            db_is_installed "$k" || continue
+            oc_title "升级内核：$(oc_title_of "$k")"
+            oc_call "$k" upgrade || rc=1
+        done
+        ((rc == 0)) && oc_ok "全部已安装协议的内核升级流程结束"
+        return "$rc"
+    fi
+    db_is_installed "$OC_CLI_KEY" || oc_die "$(oc_title_of "$OC_CLI_KEY") 未安装（升级只对已装协议有效）"
+    oc_call "$OC_CLI_KEY" upgrade ${OC_ARG_VERSION:+"$OC_ARG_VERSION"}
+}
+
 cli_link() {
     local k="$OC_CLI_KEY"
     [[ -z "$k" ]] && oc_die "--link 需要协议 key"
@@ -5879,6 +6428,7 @@ cli_run() {
         uninstall) db_is_installed "$OC_CLI_KEY" || oc_die "$(oc_title_of "$OC_CLI_KEY") 未安装"
                    oc_call "$OC_CLI_KEY" uninstall ;;
         regen)     oc_call "$OC_CLI_KEY" regen ;;
+        upgrade)   _cli_upgrade ;;
         link)      cli_link ;;
         status)    cli_status ;;
         list)      cli_list ;;
@@ -5903,6 +6453,8 @@ OneClick 一键多协议代理安装器
   oneclick --install ss_rust [--method chacha20-ietf-poly1305]   老客户端兼容加密方式
   oneclick --uninstall <key> [--yes]
   oneclick --regen <key>
+  oneclick --upgrade <key|all>                 升级已装协议的内核（备份/自检/失败回滚）
+  oneclick --upgrade snell --kernel-version X.Y.Z  snell 无版本接口，需显式指定
   oneclick --link <key> [--format uri|clash|surge|loon|singbox|qr]
   oneclick --status [--format json]
   oneclick --list
@@ -5919,8 +6471,8 @@ EOF
 oc_parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --install|--uninstall|--regen|--link)
-                [[ -n "${2:-}" ]] || oc_die "$1 需要协议 key"
+            --install|--uninstall|--regen|--link|--upgrade)
+                [[ -n "${2:-}" ]] || oc_die "$1 需要协议 key（或 all）"
                 OC_CLI_ACTION="${1#--}"
                 OC_CLI_KEY="$2"; shift 2 ;;
             --status|--list|--cert-status|--sub|--purge|--version|--help)
@@ -5931,12 +6483,17 @@ oc_parse_args() {
             --method) [[ -n "${2:-}" ]] || oc_die "--method 需要值"; OC_ARG_METHOD="$2"; shift 2 ;;
             --cert-mode) [[ -n "${2:-}" ]] || oc_die "--cert-mode 需要值"; OC_ARG_CERT_MODE="$2"; shift 2 ;;
             --format) [[ -n "${2:-}" ]] || oc_die "--format 需要值"; OC_ARG_FORMAT="$2"; shift 2 ;;
+            --kernel-version) [[ -n "${2:-}" ]] || oc_die "--kernel-version 需要版本号"; OC_ARG_VERSION="$2"; shift 2 ;;
             -y|--yes) OC_YES=1; shift ;;
             *) oc_die "未知参数：$1（--help 查看用法）" ;;
         esac
     done
     if [[ -n "$OC_CLI_KEY" ]]; then
-        oc_key_valid "$OC_CLI_KEY" || oc_die "未知协议 key：$OC_CLI_KEY（可用：${OC_PROTOS[*]}）"
+        if [[ "$OC_CLI_KEY" == "all" ]]; then
+            [[ "$OC_CLI_ACTION" == "upgrade" ]] || oc_die "只有 --upgrade 支持 all"
+        else
+            oc_key_valid "$OC_CLI_KEY" || oc_die "未知协议 key：$OC_CLI_KEY（可用：${OC_PROTOS[*]} 或 all）"
+        fi
     fi
 }
 

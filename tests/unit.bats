@@ -500,3 +500,86 @@ EOF
     # 手册说明 reality-public-key 隐含 TLS，不应再写 tls=true
     [[ "$output" != *"tls=true"* ]] || { echo "REALITY 不该加 tls=true"; return 1; }
 }
+
+# ---------- 内核升级：版本解析与备份回滚 ----------
+
+@test "oc_bin_version_parses_varied_outputs" {
+    local d="${BATS_TEST_TMPDIR}/vbins"
+    mkdir -p "$d"
+    # 模拟各内核的版本输出格式
+    printf '#!/bin/sh\n[ "$1" = version ] && echo "Xray 26.11.9 (Xray, Penetrates Everything.)"\n' > "$d/a"
+    printf '#!/bin/sh\necho "Version:\tv2.13.0"\n' > "$d/b"
+    printf '#!/bin/sh\necho "shadowsocks 1.25.0"\n' > "$d/c"
+    # 带时间戳小数（snell 的真实格式），不能误抓 04.311250
+    printf '#!/bin/sh\necho "2026-11-13 02:16:04.311250 [server_main] <NOTIFY> snell-server v6.0.0"\n' > "$d/e"
+    chmod +x "$d"/*
+    [ "$(oc_bin_version "$d/a")" = "26.11.9" ] || { echo "a: $(oc_bin_version "$d/a")"; return 1; }
+    [ "$(oc_bin_version "$d/b")" = "2.13.0" ]  || { echo "b: $(oc_bin_version "$d/b")"; return 1; }
+    [ "$(oc_bin_version "$d/c")" = "1.25.0" ]  || { echo "c: $(oc_bin_version "$d/c")"; return 1; }
+    [ "$(oc_bin_version "$d/e")" = "6.0.0" ]   || { echo "e: $(oc_bin_version "$d/e")"; return 1; }
+}
+
+@test "oc_bin_version_ignores_error_text_from_unsupported_flag" {
+    # ssserver version 会报 "unexpected argument"，不能因此停止尝试 -V
+    local d="${BATS_TEST_TMPDIR}/vbin2"
+    mkdir -p "$d"
+    cat > "$d/x" <<'EOS'
+#!/bin/sh
+case "$1" in
+  version) echo "error: unexpected argument 'version' found" >&2; exit 2 ;;
+  -V)      echo "shadowsocks 1.25.0" ;;
+esac
+EOS
+    chmod +x "$d/x"
+    [ "$(oc_bin_version "$d/x")" = "1.25.0" ] || { echo "got: $(oc_bin_version "$d/x")"; return 1; }
+}
+
+@test "upgrade_begin_backup_and_rollback" {
+    local d="${BATS_TEST_TMPDIR}/up"
+    mkdir -p "$d"
+    printf 'OLD' > "$d/bin"; chmod 755 "$d/bin"
+    local bak
+    bak="$(oc_upgrade_begin "$d/bin")" || { echo "备份失败"; return 1; }
+    [ -f "$bak" ] || { echo "备份文件不存在"; return 1; }
+    # 覆盖为新内容
+    printf 'NEW' > "$d/bin"
+    # 回滚
+    oc_upgrade_rollback "$bak" "$d/bin" || { echo "回滚失败"; return 1; }
+    [ "$(cat "$d/bin")" = "OLD" ] || { echo "回滚后内容不对：$(cat "$d/bin")"; return 1; }
+    [ ! -f "$bak" ] || { echo "回滚后备份未清理"; return 1; }
+}
+
+@test "upgrade_commit_removes_backup" {
+    local d="${BATS_TEST_TMPDIR}/up2"
+    mkdir -p "$d"
+    printf 'OLD' > "$d/bin"; chmod 755 "$d/bin"
+    local bak
+    bak="$(oc_upgrade_begin "$d/bin")"
+    oc_upgrade_commit "$bak"
+    [ ! -f "$bak" ] || { echo "commit 后备份未删"; return 1; }
+}
+
+@test "upgrade_begin_fails_on_missing_target" {
+    run oc_upgrade_begin "/nonexistent/bin"
+    [ "$status" -ne 0 ]
+}
+
+# ---------- 每个已装协议都必须提供 upgrade 函数 ----------
+
+@test "every_protocol_has_upgrade_function" {
+    local k
+    for k in "${OC_PROTOS[@]}"; do
+        declare -F "proto_${k}_upgrade" >/dev/null || {
+            echo "缺少 proto_${k}_upgrade"; return 1; }
+    done
+}
+
+# ---------- GitHub API digest 取代静态哈希表 ----------
+
+@test "dl_asset_digest_exists" {
+    declare -F dl_asset_digest >/dev/null || { echo "缺少 dl_asset_digest"; return 1; }
+    # 必须只取 sha256: 前缀后的十六进制，且按资产名精确匹配
+    local body; body="$(declare -f dl_asset_digest)"
+    [[ "$body" == *'sha256:'* ]] || { echo "未处理 sha256: 前缀"; return 1; }
+    [[ "$body" == *'select(.name == $a)'* ]] || { echo "未按资产名精确匹配"; return 1; }
+}

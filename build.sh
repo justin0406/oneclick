@@ -16,6 +16,7 @@ FILES=(
     lib/cert.sh
     lib/svc.sh
     lib/share.sh
+    lib/upgrade.sh
     proto/vless_reality.sh
     proto/hysteria2.sh
     proto/snell.sh
