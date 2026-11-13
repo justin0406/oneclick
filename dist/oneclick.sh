@@ -1154,6 +1154,11 @@ _cert_cn() {
 # 证书是否覆盖该域名（精确匹配或单级通配）
 _cert_covers() {
     local crt="$1" d="$2" n suffix label
+    # 先把 SAN/CN 全读进变量再判断。原先在 while 里直接 return，
+    # 会让上游 _cert_sans 的 sed 管道提前收到 SIGPIPE，在某些环境下
+    # 往 stderr 写 "couldn't flush stdout"，污染调用方的 $() 捕获。
+    local names
+    names="$(_cert_sans "$crt"; _cert_cn "$crt")"
     while IFS= read -r n; do
         [[ -n "$n" ]] || continue
         if [[ "$n" == "$d" ]]; then
@@ -1166,7 +1171,7 @@ _cert_covers() {
                 return 0
             fi
         fi
-    done < <(_cert_sans "$crt"; _cert_cn "$crt")
+    done <<< "$names"
     return 1
 }
 
