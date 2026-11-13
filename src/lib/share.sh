@@ -87,9 +87,6 @@ share_render_surge() {
     local -a frags=()
     for key in "${OC_PROTOS[@]}"; do
         db_is_installed "$key" || continue
-        # Surge 没有 VLESS 策略类型（手册 policies/ 下无 vless 页），REALITY 节点只输出到
-        # Clash / sing-box；这里跳过而不是写一行 Surge 解析不了的配置。
-        [[ "$key" == "vless_reality" ]] && continue
         fn="$(_share_fn "$key" surge)"
         if ! frag="$("$fn")"; then
             oc_warn "跳过 $key：Surge 节点生成失败（缺公网 IP 或状态库字段不全）"
@@ -279,17 +276,12 @@ share_print_info() {
                 ;;
             surge)
                 oc_info "Surge："
-                case "$key" in
-                    vless_reality) printf '  不支持（Surge 没有 VLESS 策略类型）\n' ;;
-                    *)
-                        fn="$(_share_fn "$key" surge)"
-                        if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
-                            printf '  %s\n' "$out"
-                        else
-                            oc_warn "生成失败"
-                        fi
-                        ;;
-                esac
+                fn="$(_share_fn "$key" surge)"
+                if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
+                    printf '  %s\n' "$out"
+                else
+                    oc_warn "生成失败"
+                fi
                 ;;
             loon)
                 oc_info "Loon："

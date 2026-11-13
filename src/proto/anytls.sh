@@ -302,6 +302,8 @@ proto_anytls_install() {
     unit="$(oc_unit_name anytls)"
     ocp_anytls_write_unit
     svc_enable "$unit"
+    # 重装必须先 stop，否则 svc_start 空操作、继续跑旧配置
+    svc_stop "$unit"
     svc_start "$unit"
     sleep 1
     if ! svc_is_active "$unit"; then

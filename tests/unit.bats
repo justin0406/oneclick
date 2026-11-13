@@ -402,9 +402,9 @@ EOF
 }
 
 # ---------- Loon VLESS 行必须用合法的 tls-profile ----------
-# 曾经输出 tls-profile=chrome（裸名），Loon 只认 TLS / chrome147 / safari-ios-26。
-# REALITY 依赖客户端 TLS 指纹，指纹名不被识别时握手直接失败——
-# 表现为"AnyTLS 能连、VLESS 连不上"。
+# 合法值以 Loon 官方示例注释为准：global/default/safari-ios18/safari-ios-26/
+# chrome/chrome147。我们输出 chrome147（带版本号的具体指纹）。
+# 注意：曾误判"chrome 非法"并把 Loon 连不上归因于此，实际根因是重装未重启服务。
 
 @test "loon_vless_uses_valid_tls_profile" {
     write_db '{"installed":["vless_reality"],"settings":{"ip":"1.2.3.4"},
@@ -415,9 +415,12 @@ EOF
     [ "$status" -eq 0 ] || { echo "生成失败"; return 1; }
     local tp
     tp="$(printf '%s' "$output" | grep -oE 'tls-profile=[^,]+')"
+    # 合法值以 Loon 官方示例注释为准：
+    # global / default / safari-ios18 / safari-ios-26 / chrome / chrome147
     case "$tp" in
-        tls-profile=TLS|tls-profile=chrome147|tls-profile=safari-ios-26) ;;
-        *) echo "tls-profile 非法：[$tp]（Loon 只认 TLS / chrome147 / safari-ios-26）"; return 1 ;;
+        tls-profile=global|tls-profile=default|tls-profile=safari-ios18|\
+        tls-profile=safari-ios-26|tls-profile=chrome|tls-profile=chrome147) ;;
+        *) echo "tls-profile 非法：[$tp]"; return 1 ;;
     esac
 }
 
@@ -435,4 +438,65 @@ EOF
     [[ "$output" == *"public-key="* ]]          || { echo "缺 public-key"; return 1; }
     [[ "$output" == *"short-id="* ]]            || { echo "缺 short-id"; return 1; }
     [[ "$output" == *"sni="* ]]                 || { echo "缺 sni"; return 1; }
+}
+
+# ---------- SS2022 的 userinfo 必须明文百分号编码（SIP022） ----------
+# SIP002 允许 base64url，但 SIP022 对 AEAD-2022 明确规定 MUST NOT 编码。
+
+@test "ss2022_userinfo_is_percent_encoded_not_base64" {
+    write_db '{"installed":["ss_rust"],"settings":{"ip":"1.2.3.4"},
+      "ss_rust":{"port":"8388","method":"2022-blake3-aes-128-gcm","password":"9510kK0JBiy5gDiiCLy7eg=="}}'
+    run proto_ss_rust_link
+    [ "$status" -eq 0 ] || { echo "生成失败"; return 1; }
+    # 明文 method 前缀，不是 base64 串
+    [[ "$output" == ss://2022-blake3-aes-128-gcm:* ]] || {
+        echo "SS2022 被 base64 编码了：$output"; return 1; }
+    # == 必须转义为 %3D%3D
+    [[ "$output" == *"%3D%3D"* ]] || { echo "= 未转义"; return 1; }
+}
+
+@test "legacy_ss_cipher_still_base64url" {
+    write_db '{"installed":["ss_rust"],"settings":{"ip":"1.2.3.4"},
+      "ss_rust":{"port":"8388","method":"chacha20-ietf-poly1305","password":"mypass"}}'
+    run proto_ss_rust_link
+    [ "$status" -eq 0 ]
+    # 传统 AEAD 沿用 base64url：不应出现明文 method
+    [[ "$output" != *"chacha20-ietf-poly1305:"* ]] || {
+        echo "传统加密方式不该用明文 userinfo"; return 1; }
+}
+
+@test "ss_pct_escapes_reserved_chars" {
+    run ocp_ssrust_pct "a=b+c/d"
+    [ "$output" = "a%3Db%2Bc%2Fd" ]
+}
+
+# ---------- Hysteria2 端口跳跃按官方 URI 规范写进端口组件 ----------
+# 官方 URI-Scheme 文档：不是 mport 查询参数，而是 :port,start-end
+
+@test "hy2_uri_puts_port_hopping_in_port_component" {
+    write_db '{"installed":["hysteria2"],"settings":{"ip":"1.2.3.4"},
+      "hysteria2":{"port":"41856","password":"pw","sni":"bing.com",
+      "tls_mode":"self","obfs":"off","hop":"20000-30000"}}'
+    run proto_hysteria2_link
+    [ "$status" -eq 0 ] || { echo "生成失败"; return 1; }
+    [[ "$output" == *":41856,20000-30000/"* ]] || {
+        echo "端口跳跃未写进端口组件：$output"; return 1; }
+    [[ "$output" != *mport* ]] || { echo "仍在用 mport"; return 1; }
+}
+
+# ---------- Surge 现已支持 VLESS（iOS 6.0.0+ / Mac 6.12.0+） ----------
+# 官方手册 policies/vless.html：username / reality-public-key / reality-short-id
+
+@test "surge_vless_uses_official_param_names" {
+    write_db '{"installed":["vless_reality"],"settings":{"ip":"1.2.3.4"},
+      "vless_reality":{"port":"443","uuid":"11111111-2222-3333-4444-555555555555",
+      "server_name":"www.microsoft.com","short_id":"5ae06551",
+      "public_key":"qxnmPvI1Ku9BIZhNhZZS14F-jfrdz_URYf80AoruNEA"}}'
+    run proto_vless_reality_surge
+    [ "$status" -eq 0 ] || { echo "生成失败"; return 1; }
+    [[ "$output" == *"username=11111111-2222-3333-4444-555555555555"* ]] || { echo "缺 username"; return 1; }
+    [[ "$output" == *"reality-public-key="* ]] || { echo "缺 reality-public-key"; return 1; }
+    [[ "$output" == *"reality-short-id="* ]] || { echo "缺 reality-short-id"; return 1; }
+    # 手册说明 reality-public-key 隐含 TLS，不应再写 tls=true
+    [[ "$output" != *"tls=true"* ]] || { echo "REALITY 不该加 tls=true"; return 1; }
 }

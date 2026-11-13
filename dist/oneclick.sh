@@ -17,7 +17,7 @@ if (( BASH_VERSINFO[0] < 4 )); then
     exit 1
 fi
 
-OC_VERSION="0.4.6"
+OC_VERSION="0.5.0"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -1775,9 +1775,6 @@ share_render_surge() {
     local -a frags=()
     for key in "${OC_PROTOS[@]}"; do
         db_is_installed "$key" || continue
-        # Surge 没有 VLESS 策略类型（手册 policies/ 下无 vless 页），REALITY 节点只输出到
-        # Clash / sing-box；这里跳过而不是写一行 Surge 解析不了的配置。
-        [[ "$key" == "vless_reality" ]] && continue
         fn="$(_share_fn "$key" surge)"
         if ! frag="$("$fn")"; then
             oc_warn "跳过 $key：Surge 节点生成失败（缺公网 IP 或状态库字段不全）"
@@ -1967,17 +1964,12 @@ share_print_info() {
                 ;;
             surge)
                 oc_info "Surge："
-                case "$key" in
-                    vless_reality) printf '  不支持（Surge 没有 VLESS 策略类型）\n' ;;
-                    *)
-                        fn="$(_share_fn "$key" surge)"
-                        if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
-                            printf '  %s\n' "$out"
-                        else
-                            oc_warn "生成失败"
-                        fi
-                        ;;
-                esac
+                fn="$(_share_fn "$key" surge)"
+                if out="$("$fn" 2>/dev/null)" && [[ -n "$out" ]]; then
+                    printf '  %s\n' "$out"
+                else
+                    oc_warn "生成失败"
+                fi
                 ;;
             loon)
                 oc_info "Loon："
@@ -2177,6 +2169,16 @@ ocp_vless_reality_ip() {
     printf '%s' "$ip"
 }
 
+# 主机名片段：取不到 IP 返回 1（调用方据此报错，不产出坏节点）；
+# IPv6 加方括号后才能拼进 URI / Surge / Loon 行。
+ocp_vless_reality_host() {
+    local ip
+    ip="$(ocp_vless_reality_ip)"
+    [[ -z "$ip" ]] && return 1
+    [[ "$ip" == *:* ]] && ip="[${ip}]"
+    printf '%s' "$ip"
+}
+
 proto_vless_reality_meta() {
     local port
     port="$(db_get vless_reality port "")"
@@ -2292,6 +2294,9 @@ proto_vless_reality_install() {
     unit="$(oc_unit_name "$key")"
     svc_create "$unit" "$bin run -c $cfg" "OneClick VLESS-Reality (Xray-core)"
     svc_enable "$unit"
+    # 重装时必须先 stop：svc_start 对已运行的服务是空操作，
+    # 不停就会"启动成功"却仍在跑旧配置（旧端口/旧密钥）。
+    svc_stop "$unit"
     svc_start "$unit"
     sleep 1
     if ! svc_is_active "$unit"; then
@@ -2497,6 +2502,29 @@ proto_vless_reality_clash() {
     printf '    client-fingerprint: chrome\n'
 }
 
+# Surge 自 iOS 6.0.0 / Mac 6.12.0 起支持 VLESS，含 REALITY。
+# 参数名以官方手册 policies/vless.html 为准：REALITY 由 reality-public-key 开启，
+# 没有独立的 reality=true 开关；short-id 对应 reality-short-id；用户名参数叫 username。
+proto_vless_reality_surge() {
+    local key="vless_reality" ip port uuid sni sid pub name line
+    if ! db_has "$key"; then
+        oc_err "VLESS-Reality 未安装"
+        return 1
+    fi
+    ip="$(ocp_vless_reality_host)" || return 1
+    port="$(db_get "$key" port "")"
+    uuid="$(db_get "$key" uuid "")"
+    sni="$(db_get "$key" server_name "www.microsoft.com")"
+    sid="$(db_get "$key" short_id "")"
+    pub="$(db_get "$key" public_key "")"
+    [[ -n "$port" && -n "$uuid" && -n "$sid" && -n "$pub" ]] || return 1
+    name="${OC_PROTO_TITLE[$key]:-VLESS-Reality}"
+    # reality-public-key 隐含 TLS，不需要 tls=true（手册明确说明）
+    line="$name = vless, $ip, $port, username=$uuid, flow=xtls-rprx-vision"
+    line+=", reality-public-key=$pub, reality-short-id=$sid, sni=$sni"
+    printf '%s\n' "$line"
+}
+
 proto_vless_reality_singbox() {
     local key="vless_reality" ip port uuid sni sid pub name
     if ! db_has "$key"; then
@@ -2551,10 +2579,10 @@ proto_vless_reality_loon() {
     pub="$(db_get "$key" public_key "")"
     [[ -n "$ip" && -n "$uuid" && -n "$sid" && -n "$pub" ]] || return 1
     name="$(oc_loon_name "$key")"
-    # 参数顺序与取值对齐 Loon 官方示例（LoonExampleConfig/Nodes/ExampleNodes.list
-    # 的 vlessReality 行）：flow 紧跟 transport；tls-profile 必须是带版本号的
-    # 具体指纹（chrome147 / safari-ios-26 之类），裸 "chrome" 不是合法值——
-    # REALITY 依赖客户端 TLS 指纹，指纹名不被识别时握手直接失败。
+    # 参数对齐 Loon 官方示例（LoonExampleConfig/Nodes/ExampleNodes.list 的
+    # vlessReality 行）：flow 紧跟 transport，public-key/short-id 在 sni 之前。
+    # tls-profile 的合法值见该文件注释：global/default/safari-ios18/
+    # safari-ios-26/chrome/chrome147 —— chrome 与 chrome147 都合法。
     printf '%s = VLESS,%s,%s,"%s",transport=tcp,flow=xtls-rprx-vision,over-tls=true,public-key="%s",short-id=%s,sni=%s,tls-profile=chrome147,udp=true,block-quic=false\n' \
         "$name" "$ip" "$port" "$uuid" "$pub" "$sid" "$sni"
 }
@@ -2872,6 +2900,8 @@ proto_hysteria2_install() {
     unit="$(oc_unit_name hysteria2)"
     ocp_hy2_write_unit
     svc_enable "$unit"
+    # 重装必须先 stop，否则 svc_start 空操作、继续跑旧配置
+    svc_stop "$unit"
     svc_start "$unit"
     sleep 1
     if ! svc_is_active "$unit"; then
@@ -2995,10 +3025,11 @@ proto_hysteria2_link() {
     if [[ "$obfs" == "salamander" && -n "$obfs_pw" ]]; then
         q+="&obfs=salamander&obfs-password=${obfs_pw}"
     fi
-    if [[ -n "$hop" ]]; then
-        q+="&mport=${hop}"
-    fi
-    printf 'hysteria2://%s@%s:%s/?%s#%s\n' "$pw" "$host" "$port" "$q" "$(ocp_hy2_name)"
+    # 端口跳跃按官方 URI 规范写进端口组件（:port,start-end），不是 mport 查询参数：
+    # https://v2.hysteria.network/docs/developers/URI-Scheme/
+    local portpart="$port"
+    [[ -n "$hop" ]] && portpart="${port},${hop}"
+    printf 'hysteria2://%s@%s:%s/?%s#%s\n' "$pw" "$host" "$portpart" "$q" "$(ocp_hy2_name)"
 }
 
 proto_hysteria2_regen() {
@@ -4062,6 +4093,39 @@ ocp_ssrust_b64url() {
     printf '%s' "$1" | base64 | tr -d '\r\n' | tr '+/' '-_' | tr -d '='
 }
 
+# SIP002 userinfo，按加密方式选择编码（SIP022 有强制要求）：
+#   - SS2022（2022-*）：userinfo MUST NOT 用 Base64URL，必须明文且 method/password
+#     各自百分号编码。否则严格实现的客户端（mihomo/sing-box/Shadowrocket）解析失败。
+#   - 传统 AEAD/stream：Base64URL 推荐但不强制，沿用 base64url 保持向后兼容。
+ocp_ssrust_userinfo() {
+    local method="$1" password="$2"
+    case "$method" in
+        2022-*)
+            # 百分号编码：除 unreserved 字符外全部转义
+            printf '%s:%s' \
+                "$(ocp_ssrust_pct "$method")" \
+                "$(ocp_ssrust_pct "$password")"
+            ;;
+        *)
+            ocp_ssrust_b64url "${method}:${password}"
+            ;;
+    esac
+}
+
+# RFC3986 百分号编码（保留 unreserved：A-Z a-z 0-9 - . _ ~）
+ocp_ssrust_pct() {
+    local s="$1" out="" c i
+    LC_ALL=C
+    for ((i = 0; i < ${#s}; i++)); do
+        c="${s:i:1}"
+        case "$c" in
+            [A-Za-z0-9._~-]) out+="$c" ;;
+            *) out+="$(printf '%%%02X' "'$c")" ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
 # 下载并安装 ssserver。<ver> 由调用方给出（含 v 的 tag 名由本函数自己拼）。
 # 不用 dl_gh：它拿 dl_latest_tag 去掉 v 的版本号去拼 /download/<ver>/，会 404。
 ocp_ssrust_fetch_ss() {
@@ -4441,7 +4505,7 @@ proto_ss_rust_link() {
         return 1
     }
     name="$(ocp_ssrust_name)"
-    userinfo="$(ocp_ssrust_b64url "${method}:${password}")"
+    userinfo="$(ocp_ssrust_userinfo "$method" "$password")"
     stls="$(db_get ss_rust shadowtls "no")"
     if [[ "$stls" == "yes" ]]; then
         stls_port="$(db_get ss_rust stls_port "")"
@@ -5028,6 +5092,8 @@ proto_anytls_install() {
     unit="$(oc_unit_name anytls)"
     ocp_anytls_write_unit
     svc_enable "$unit"
+    # 重装必须先 stop，否则 svc_start 空操作、继续跑旧配置
+    svc_stop "$unit"
     svc_start "$unit"
     sleep 1
     if ! svc_is_active "$unit"; then
@@ -5794,13 +5860,7 @@ cli_link() {
     case "${OC_ARG_FORMAT:-uri}" in
         uri|"") oc_call "$k" link ;;
         clash)  oc_call "$k" clash ;;
-        surge)
-            # Surge 没有 VLESS 策略类型：share_render_surge 里是跳过，这里直接说清楚，
-            # 否则会撞上不存在的 proto_vless_reality_surge，报 command not found。
-            if [[ "$k" == "vless_reality" ]]; then
-                oc_die "Surge 没有 VLESS 策略类型；VLESS-Reality 请用 --format clash|loon|singbox|uri"
-            fi
-            oc_call "$k" surge ;;
+        surge) oc_call "$k" surge ;;
         loon)
             if [[ "$k" == "snell" ]]; then
                 oc_die "Loon 不支持 Snell；Snell 请用 --format surge|clash|singbox|uri"

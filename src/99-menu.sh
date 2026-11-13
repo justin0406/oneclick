@@ -556,13 +556,7 @@ cli_link() {
     case "${OC_ARG_FORMAT:-uri}" in
         uri|"") oc_call "$k" link ;;
         clash)  oc_call "$k" clash ;;
-        surge)
-            # Surge 没有 VLESS 策略类型：share_render_surge 里是跳过，这里直接说清楚，
-            # 否则会撞上不存在的 proto_vless_reality_surge，报 command not found。
-            if [[ "$k" == "vless_reality" ]]; then
-                oc_die "Surge 没有 VLESS 策略类型；VLESS-Reality 请用 --format clash|loon|singbox|uri"
-            fi
-            oc_call "$k" surge ;;
+        surge) oc_call "$k" surge ;;
         loon)
             if [[ "$k" == "snell" ]]; then
                 oc_die "Loon 不支持 Snell；Snell 请用 --format surge|clash|singbox|uri"

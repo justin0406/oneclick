@@ -40,9 +40,9 @@ setup_lib() {
     mkdir -p "$OC_ROOT"
     # shellcheck disable=SC1090
     source "$LIB"
-    # 默认让 IP 探测"失败"，单个测试需要时自己覆盖
+    # 默认让"实时探测"失败（不联网），但 db_setting 走真实读取，
+    # 这样测试只要在 db 里写好 settings.ip 就能拿到确定的服务器地址。
     net_primary_ip() { return 0; }
-    db_setting() { [[ $# -ge 2 ]] && return 0; printf ''; }
 }
 
 # 写一个最小的 db.json

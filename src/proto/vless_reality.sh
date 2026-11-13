@@ -173,6 +173,16 @@ ocp_vless_reality_ip() {
     printf '%s' "$ip"
 }
 
+# 主机名片段：取不到 IP 返回 1（调用方据此报错，不产出坏节点）；
+# IPv6 加方括号后才能拼进 URI / Surge / Loon 行。
+ocp_vless_reality_host() {
+    local ip
+    ip="$(ocp_vless_reality_ip)"
+    [[ -z "$ip" ]] && return 1
+    [[ "$ip" == *:* ]] && ip="[${ip}]"
+    printf '%s' "$ip"
+}
+
 proto_vless_reality_meta() {
     local port
     port="$(db_get vless_reality port "")"
@@ -288,6 +298,9 @@ proto_vless_reality_install() {
     unit="$(oc_unit_name "$key")"
     svc_create "$unit" "$bin run -c $cfg" "OneClick VLESS-Reality (Xray-core)"
     svc_enable "$unit"
+    # 重装时必须先 stop：svc_start 对已运行的服务是空操作，
+    # 不停就会"启动成功"却仍在跑旧配置（旧端口/旧密钥）。
+    svc_stop "$unit"
     svc_start "$unit"
     sleep 1
     if ! svc_is_active "$unit"; then
@@ -493,6 +506,29 @@ proto_vless_reality_clash() {
     printf '    client-fingerprint: chrome\n'
 }
 
+# Surge 自 iOS 6.0.0 / Mac 6.12.0 起支持 VLESS，含 REALITY。
+# 参数名以官方手册 policies/vless.html 为准：REALITY 由 reality-public-key 开启，
+# 没有独立的 reality=true 开关；short-id 对应 reality-short-id；用户名参数叫 username。
+proto_vless_reality_surge() {
+    local key="vless_reality" ip port uuid sni sid pub name line
+    if ! db_has "$key"; then
+        oc_err "VLESS-Reality 未安装"
+        return 1
+    fi
+    ip="$(ocp_vless_reality_host)" || return 1
+    port="$(db_get "$key" port "")"
+    uuid="$(db_get "$key" uuid "")"
+    sni="$(db_get "$key" server_name "www.microsoft.com")"
+    sid="$(db_get "$key" short_id "")"
+    pub="$(db_get "$key" public_key "")"
+    [[ -n "$port" && -n "$uuid" && -n "$sid" && -n "$pub" ]] || return 1
+    name="${OC_PROTO_TITLE[$key]:-VLESS-Reality}"
+    # reality-public-key 隐含 TLS，不需要 tls=true（手册明确说明）
+    line="$name = vless, $ip, $port, username=$uuid, flow=xtls-rprx-vision"
+    line+=", reality-public-key=$pub, reality-short-id=$sid, sni=$sni"
+    printf '%s\n' "$line"
+}
+
 proto_vless_reality_singbox() {
     local key="vless_reality" ip port uuid sni sid pub name
     if ! db_has "$key"; then
@@ -547,10 +583,10 @@ proto_vless_reality_loon() {
     pub="$(db_get "$key" public_key "")"
     [[ -n "$ip" && -n "$uuid" && -n "$sid" && -n "$pub" ]] || return 1
     name="$(oc_loon_name "$key")"
-    # 参数顺序与取值对齐 Loon 官方示例（LoonExampleConfig/Nodes/ExampleNodes.list
-    # 的 vlessReality 行）：flow 紧跟 transport；tls-profile 必须是带版本号的
-    # 具体指纹（chrome147 / safari-ios-26 之类），裸 "chrome" 不是合法值——
-    # REALITY 依赖客户端 TLS 指纹，指纹名不被识别时握手直接失败。
+    # 参数对齐 Loon 官方示例（LoonExampleConfig/Nodes/ExampleNodes.list 的
+    # vlessReality 行）：flow 紧跟 transport，public-key/short-id 在 sni 之前。
+    # tls-profile 的合法值见该文件注释：global/default/safari-ios18/
+    # safari-ios-26/chrome/chrome147 —— chrome 与 chrome147 都合法。
     printf '%s = VLESS,%s,%s,"%s",transport=tcp,flow=xtls-rprx-vision,over-tls=true,public-key="%s",short-id=%s,sni=%s,tls-profile=chrome147,udp=true,block-quic=false\n' \
         "$name" "$ip" "$port" "$uuid" "$pub" "$sid" "$sni"
 }

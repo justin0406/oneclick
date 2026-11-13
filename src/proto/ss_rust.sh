@@ -384,6 +384,39 @@ ocp_ssrust_b64url() {
     printf '%s' "$1" | base64 | tr -d '\r\n' | tr '+/' '-_' | tr -d '='
 }
 
+# SIP002 userinfo，按加密方式选择编码（SIP022 有强制要求）：
+#   - SS2022（2022-*）：userinfo MUST NOT 用 Base64URL，必须明文且 method/password
+#     各自百分号编码。否则严格实现的客户端（mihomo/sing-box/Shadowrocket）解析失败。
+#   - 传统 AEAD/stream：Base64URL 推荐但不强制，沿用 base64url 保持向后兼容。
+ocp_ssrust_userinfo() {
+    local method="$1" password="$2"
+    case "$method" in
+        2022-*)
+            # 百分号编码：除 unreserved 字符外全部转义
+            printf '%s:%s' \
+                "$(ocp_ssrust_pct "$method")" \
+                "$(ocp_ssrust_pct "$password")"
+            ;;
+        *)
+            ocp_ssrust_b64url "${method}:${password}"
+            ;;
+    esac
+}
+
+# RFC3986 百分号编码（保留 unreserved：A-Z a-z 0-9 - . _ ~）
+ocp_ssrust_pct() {
+    local s="$1" out="" c i
+    LC_ALL=C
+    for ((i = 0; i < ${#s}; i++)); do
+        c="${s:i:1}"
+        case "$c" in
+            [A-Za-z0-9._~-]) out+="$c" ;;
+            *) out+="$(printf '%%%02X' "'$c")" ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
 # 下载并安装 ssserver。<ver> 由调用方给出（含 v 的 tag 名由本函数自己拼）。
 # 不用 dl_gh：它拿 dl_latest_tag 去掉 v 的版本号去拼 /download/<ver>/，会 404。
 ocp_ssrust_fetch_ss() {
@@ -763,7 +796,7 @@ proto_ss_rust_link() {
         return 1
     }
     name="$(ocp_ssrust_name)"
-    userinfo="$(ocp_ssrust_b64url "${method}:${password}")"
+    userinfo="$(ocp_ssrust_userinfo "$method" "$password")"
     stls="$(db_get ss_rust shadowtls "no")"
     if [[ "$stls" == "yes" ]]; then
         stls_port="$(db_get ss_rust stls_port "")"

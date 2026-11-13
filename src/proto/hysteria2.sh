@@ -310,6 +310,8 @@ proto_hysteria2_install() {
     unit="$(oc_unit_name hysteria2)"
     ocp_hy2_write_unit
     svc_enable "$unit"
+    # 重装必须先 stop，否则 svc_start 空操作、继续跑旧配置
+    svc_stop "$unit"
     svc_start "$unit"
     sleep 1
     if ! svc_is_active "$unit"; then
@@ -433,10 +435,11 @@ proto_hysteria2_link() {
     if [[ "$obfs" == "salamander" && -n "$obfs_pw" ]]; then
         q+="&obfs=salamander&obfs-password=${obfs_pw}"
     fi
-    if [[ -n "$hop" ]]; then
-        q+="&mport=${hop}"
-    fi
-    printf 'hysteria2://%s@%s:%s/?%s#%s\n' "$pw" "$host" "$port" "$q" "$(ocp_hy2_name)"
+    # 端口跳跃按官方 URI 规范写进端口组件（:port,start-end），不是 mport 查询参数：
+    # https://v2.hysteria.network/docs/developers/URI-Scheme/
+    local portpart="$port"
+    [[ -n "$hop" ]] && portpart="${port},${hop}"
+    printf 'hysteria2://%s@%s:%s/?%s#%s\n' "$pw" "$host" "$portpart" "$q" "$(ocp_hy2_name)"
 }
 
 proto_hysteria2_regen() {
