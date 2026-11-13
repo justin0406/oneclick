@@ -87,6 +87,18 @@ os_dep_install() {
 
 os_service_reload() { systemctl daemon-reload >/dev/null 2>&1 || true; }
 
+# 本脚本只用 systemd 管服务。容器/LXC/WSL 里没有 systemd 时，
+# 以前会一路装完 unit、二进制、证书，最后服务起不来；这里提前拒绝。
+oc_require_systemd() {
+    [[ -d /run/systemd/system ]] && return 0
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-units >/dev/null 2>&1; then
+        return 0
+    fi
+    oc_die "未检测到运行中的 systemd（容器 / LXC / WSL？）。
+  本脚本通过 systemd 管理服务，请换到带 systemd 的系统运行。
+  若只想清理旧安装，可用 oneclick --purge"
+}
+
 os_random_token() {
     local len="${1:-16}" out=""
     out="$(LC_ALL=C tr -dc 'A-HJ-NP-Za-km-z2-9' < /dev/urandom 2>/dev/null | head -c "$len" || true)"

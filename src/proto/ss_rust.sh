@@ -81,23 +81,23 @@ ocp_ssrust_port_ok() {
 # 一律选 musl 静态版：官方 gnu 版在 Ubuntu 24.04 上构建，要求 GLIBC_2.38+，
 # 在 Debian 12 / Ubuntu 22.04 等 glibc 较旧的目标机上会直接报 "GLIBC_2.38 not found"。
 ocp_ssrust_arch() {
-    case "${1:-${OC_ARCH:-}}" in
+    case "${OC_ARCH:-}" in
         amd64)  printf 'x86_64-unknown-linux-musl' ;;
         arm64)  printf 'aarch64-unknown-linux-musl' ;;
         armv7l) printf 'armv7-unknown-linux-musleabihf' ;;
         i386)   printf 'i686-unknown-linux-musl' ;;
-        *)      oc_err "SS-Rust 不支持当前架构：${1:-${OC_ARCH:-未知}}" ;;
+        *)      oc_err "SS-Rust 不支持当前架构：${OC_ARCH:-未知}" ;;
     esac
 }
 
 # OC_ARCH -> shadow-tls release 的 target 段（musl 静态单文件；无 i386 构建）
 ocp_ssrust_stls_arch() {
-    case "${1:-${OC_ARCH:-}}" in
+    case "${OC_ARCH:-}" in
         amd64)  printf 'x86_64-unknown-linux-musl' ;;
         arm64)  printf 'aarch64-unknown-linux-musl' ;;
         armv7l) printf 'armv7-unknown-linux-musleabihf' ;;
         i386)   oc_err "ShadowTLS 未提供 i386 构建；可用 --no-shadowtls 的安装方式跳过（i386 请选择不启用）" ;;
-        *)      oc_err "ShadowTLS 不支持当前架构：${1:-${OC_ARCH:-未知}}" ;;
+        *)      oc_err "ShadowTLS 不支持当前架构：${OC_ARCH:-未知}" ;;
     esac
 }
 

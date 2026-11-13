@@ -20,10 +20,20 @@ its own official release page.
 | Multi-protocol + subscription | [mozisen/surge](https://github.com/mozisen/surge) | protocol registry, Clash / Surge / sing-box subscription shapes |
 
 At the time of writing (November 2026) **none of the upstream repositories
-declared a license**. This repository therefore claims no license of its own:
-no permission is granted to redistribute, sublicense, or sell it. If you are
-an upstream author and want attribution changed or content removed, open an
-issue.
+declared a license**. No source code from them is vendored here — they were
+read as reference for install flows and default parameters, and everything in
+`src/` is a reimplementation.
+
+Consequently the license split is:
+
+- **This repository's own code** (everything under `src/`, `build.sh`,
+  `tests/`, `README*`, `NOTICE.md`): MIT, see [LICENSE](LICENSE).
+- **Upstream projects**: no license granted by them, so no code is copied from
+  them. If you are an upstream author and want attribution changed or content
+  removed, open an issue.
+
+If you redistribute this repository, keep `NOTICE.md` alongside it so the
+upstream attribution travels with the code.
 
 ## Runtime components
 

@@ -17,7 +17,7 @@ if (( BASH_VERSINFO[0] < 4 )); then
     exit 1
 fi
 
-OC_VERSION="0.3.0"
+OC_VERSION="0.4.0"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -163,6 +163,18 @@ os_dep_install() {
 }
 
 os_service_reload() { systemctl daemon-reload >/dev/null 2>&1 || true; }
+
+# 本脚本只用 systemd 管服务。容器/LXC/WSL 里没有 systemd 时，
+# 以前会一路装完 unit、二进制、证书，最后服务起不来；这里提前拒绝。
+oc_require_systemd() {
+    [[ -d /run/systemd/system ]] && return 0
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-units >/dev/null 2>&1; then
+        return 0
+    fi
+    oc_die "未检测到运行中的 systemd（容器 / LXC / WSL？）。
+  本脚本通过 systemd 管理服务，请换到带 systemd 的系统运行。
+  若只想清理旧安装，可用 oneclick --purge"
+}
 
 os_random_token() {
     local len="${1:-16}" out=""
@@ -434,6 +446,24 @@ oc_ask() {
     fi
     read -r ans || ans=""
     printf '%s' "${ans:-$def}"
+}
+
+# 提问并把答案写进指定变量：不经 $(...) 子壳，提示和 read 都在当前 shell 里跑。
+# oc_ask "$(...)" 在部分终端/重定向下会丢掉提示，只剩一个看不见的等待。
+# oc_ask_into <变量名> <提示> [默认值]
+oc_ask_into() {
+    local __var="$1" prompt="$2" def="${3:-}" ans
+    if [[ "$OC_YES" == "1" && -n "$def" ]]; then
+        printf -v "$__var" '%s' "$def"
+        return 0
+    fi
+    if [[ -n "$def" ]]; then
+        printf '%b%s%b [%s]: ' "$C_Y" "$prompt" "$C_N" "$def" >&2
+    else
+        printf '%b%s%b: ' "$C_Y" "$prompt" "$C_N" >&2
+    fi
+    read -r ans || ans=""
+    printf -v "$__var" '%s' "${ans:-$def}"
 }
 
 # 不回显提问
@@ -2033,11 +2063,16 @@ ocp_vless_reality_port() {
     printf '%s' "$port"
 }
 
-# 输出 "serverName dest"（空格分隔）。dest 缺省补 :443。
+# 询问 dest / SNI，结果写入全局 VLR_SNI、VLR_DEST（dest 缺省补 :443）。
+# 不用 $(...) 包住提问：提示与 read 都在当前 shell 里直接执行，
+# 终端上一定看得见；以前写成 read ... <<< "$(ocp_vless_reality_dest)" 时，
+# 子壳里的提示会丢，表现成"安装无声卡住、按一次回车才继续"。
 ocp_vless_reality_dest() {
     local def="${OC_ARG_SNI:-www.microsoft.com}" input sni dest
-    oc_warn "提示：dest 必须是未过 CDN 的真实站点，套了 CDN 会破坏 REALITY 的 TLS 指纹"
-    input="$(oc_ask "REALITY 伪装域名（回车用默认，真实域名不能过 CDN）" "$def")"
+    VLR_SNI=""
+    VLR_DEST=""
+    oc_info "REALITY 需要一个未过 CDN 的真实站点做伪装目标（dest）"
+    oc_ask_into input "REALITY 伪装域名（回车用默认，真实域名不能过 CDN）" "$def"
     input="$(printf '%s' "$input" | tr -d '[:space:]')"
     [[ -z "$input" ]] && input="$def"
     if [[ "$input" == *:* ]]; then
@@ -2049,7 +2084,8 @@ ocp_vless_reality_dest() {
     fi
     [[ "$sni" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || oc_die "域名格式不合法：$sni"
     [[ "$sni" == *.* ]] || oc_die "域名格式不合法（需要含点）：$sni"
-    printf '%s %s\n' "$sni" "$dest"
+    VLR_SNI="$sni"
+    VLR_DEST="$dest"
 }
 
 # 写 inbounds[0] + 基本 direct/block 出站；600；先写临时文件再 mv。
@@ -2156,6 +2192,14 @@ proto_vless_reality_install() {
     # 端口先判，避免下载完才发现被占用
     port="$(ocp_vless_reality_port)" || return 1
 
+    # dest 与端口一起问完再下载：以前放在下载之后，是唯一"下载完才突然要输入"的提问，
+    # 提示又被 $(...) 吞掉，实际表现就是安装无声卡住、按一次回车才继续。
+    ocp_vless_reality_dest
+    sni="$VLR_SNI"
+    dest="$VLR_DEST"
+    [[ -n "$sni" && -n "$dest" ]] || oc_die "REALITY dest 获取失败"
+    oc_kv "伪装目标" "$dest"
+
     bin="$OC_BIN_DIR/xray"
     if [[ -x "$bin" ]] && "$bin" version >/dev/null 2>&1; then
         ver="$("$bin" version 2>/dev/null | head -n1 | awk '{print $2}')"
@@ -2212,9 +2256,6 @@ proto_vless_reality_install() {
     db_set "$key" public_key "$pub"
     db_set "$key" uuid "$uuid"
     db_set "$key" short_id "$sid"
-
-    read -r sni dest <<< "$(ocp_vless_reality_dest)"
-    [[ -n "$sni" && -n "$dest" ]] || oc_die "REALITY dest 获取失败"
 
     dir="$(oc_proto_dir "$key")"
     if ! cfg="$(ocp_vless_reality_cfg_write "$port" "$uuid" "$priv" "$sni" "$sid" "$dest")"; then
@@ -3672,23 +3713,23 @@ ocp_ssrust_port_ok() {
 # 一律选 musl 静态版：官方 gnu 版在 Ubuntu 24.04 上构建，要求 GLIBC_2.38+，
 # 在 Debian 12 / Ubuntu 22.04 等 glibc 较旧的目标机上会直接报 "GLIBC_2.38 not found"。
 ocp_ssrust_arch() {
-    case "${1:-${OC_ARCH:-}}" in
+    case "${OC_ARCH:-}" in
         amd64)  printf 'x86_64-unknown-linux-musl' ;;
         arm64)  printf 'aarch64-unknown-linux-musl' ;;
         armv7l) printf 'armv7-unknown-linux-musleabihf' ;;
         i386)   printf 'i686-unknown-linux-musl' ;;
-        *)      oc_err "SS-Rust 不支持当前架构：${1:-${OC_ARCH:-未知}}" ;;
+        *)      oc_err "SS-Rust 不支持当前架构：${OC_ARCH:-未知}" ;;
     esac
 }
 
 # OC_ARCH -> shadow-tls release 的 target 段（musl 静态单文件；无 i386 构建）
 ocp_ssrust_stls_arch() {
-    case "${1:-${OC_ARCH:-}}" in
+    case "${OC_ARCH:-}" in
         amd64)  printf 'x86_64-unknown-linux-musl' ;;
         arm64)  printf 'aarch64-unknown-linux-musl' ;;
         armv7l) printf 'armv7-unknown-linux-musleabihf' ;;
         i386)   oc_err "ShadowTLS 未提供 i386 构建；可用 --no-shadowtls 的安装方式跳过（i386 请选择不启用）" ;;
-        *)      oc_err "ShadowTLS 不支持当前架构：${1:-${OC_ARCH:-未知}}" ;;
+        *)      oc_err "ShadowTLS 不支持当前架构：${OC_ARCH:-未知}" ;;
     esac
 }
 
@@ -5469,19 +5510,24 @@ _bk_backup() {
 }
 
 _bk_restore() {
-    local f bad
+    local f bad members
     f="$(oc_ask "备份文件路径" "")"
     [[ -f "$f" ]] || { oc_err "文件不存在"; return 1; }
     # 解压目标是 /，而 GNU tar 不会拦 ../ 之类的成员名：先列出成员逐个校验，
     # 只允许 etc/oneclick 下的内容，避免恶意/损坏的备份写到任意路径。
-    if ! bad="$(tar -tzf "$f" 2>/dev/null | awk '
-        /^\// { print; next }                        # 绝对路径
-        /(^|\/)\.\.(\/|$)/ { print; next }           # 路径穿越
-        $0 !~ /^etc\/oneclick(\/|$)/ { print; next }  # 越界内容
-    ' | head -5)"; then
+    # 注意先单独跑 tar：管道里 $? 是 awk 的，tar 损坏会被吞掉。
+    members="$(mktemp)" || return 1
+    if ! tar -tzf "$f" > "$members" 2>/dev/null; then
+        rm -f "$members"
         oc_err "备份包无法读取（不是有效 tar.gz？）"
         return 1
     fi
+    bad="$(awk '
+        /^\// { print; next }                        # 绝对路径
+        /(^|\/)\.\.(\/|$)/ { print; next }           # 路径穿越
+        $0 !~ /^etc\/oneclick(\/|$)/ { print; next }  # 越界内容
+    ' "$members" | head -5)"
+    rm -f "$members"
     if [[ -n "$bad" ]]; then
         oc_err "备份包含有非法或越界的成员，已拒绝解压："
         printf '  %s\n' $bad >&2
@@ -5699,8 +5745,18 @@ cli_link() {
     case "${OC_ARG_FORMAT:-uri}" in
         uri|"") oc_call "$k" link ;;
         clash)  oc_call "$k" clash ;;
-        surge)  oc_call "$k" surge ;;
-        loon)   oc_call "$k" loon ;;
+        surge)
+            # Surge 没有 VLESS 策略类型：share_render_surge 里是跳过，这里直接说清楚，
+            # 否则会撞上不存在的 proto_vless_reality_surge，报 command not found。
+            if [[ "$k" == "vless_reality" ]]; then
+                oc_die "Surge 没有 VLESS 策略类型；VLESS-Reality 请用 --format clash|loon|singbox|uri"
+            fi
+            oc_call "$k" surge ;;
+        loon)
+            if [[ "$k" == "snell" ]]; then
+                oc_die "Loon 不支持 Snell；Snell 请用 --format surge|clash|singbox|uri"
+            fi
+            oc_call "$k" loon ;;
         singbox|sing-box) oc_call "$k" singbox ;;
         qr) oc_call "$k" link | head -1 | while read -r l; do share_qr "$l"; done ;;
         *) oc_die "未知格式：$OC_ARG_FORMAT（uri|clash|surge|loon|singbox|qr）" ;;
@@ -5784,6 +5840,8 @@ main() {
         version) printf 'oneclick %s\n' "$OC_VERSION"; return 0 ;;
     esac
     oc_require_root
+    # --purge 例外：没有 systemd 的机器也要能把以前的残留清掉
+    [[ "$OC_CLI_ACTION" == "purge" ]] || oc_require_systemd
     oc_self_update
     os_detect
     export DEBIAN_FRONTEND=noninteractive

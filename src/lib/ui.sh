@@ -235,6 +235,24 @@ oc_ask() {
     printf '%s' "${ans:-$def}"
 }
 
+# 提问并把答案写进指定变量：不经 $(...) 子壳，提示和 read 都在当前 shell 里跑。
+# oc_ask "$(...)" 在部分终端/重定向下会丢掉提示，只剩一个看不见的等待。
+# oc_ask_into <变量名> <提示> [默认值]
+oc_ask_into() {
+    local __var="$1" prompt="$2" def="${3:-}" ans
+    if [[ "$OC_YES" == "1" && -n "$def" ]]; then
+        printf -v "$__var" '%s' "$def"
+        return 0
+    fi
+    if [[ -n "$def" ]]; then
+        printf '%b%s%b [%s]: ' "$C_Y" "$prompt" "$C_N" "$def" >&2
+    else
+        printf '%b%s%b: ' "$C_Y" "$prompt" "$C_N" >&2
+    fi
+    read -r ans || ans=""
+    printf -v "$__var" '%s' "${ans:-$def}"
+}
+
 # 不回显提问
 oc_ask_secret() {
     local prompt="$1" ans

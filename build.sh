@@ -71,6 +71,12 @@ else
 fi
 
 echo "== 3/4 未定义函数扫描 =="
+# perl 缺失时这项检查会静默失效（旧版本只打印 perl: not found 然后照样 ✓），
+# 直接当成构建失败，避免"假绿"。
+if ! command -v perl >/dev/null 2>&1; then
+    echo "✗ 未安装 perl：未定义函数扫描无法执行（apt install perl）"
+    exit 1
+fi
 defined="$(grep -oE '^[[:space:]]*[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*\(\)' "$OUT" \
     | grep -oE '[a-zA-Z_][a-zA-Z0-9_]*' | sort -u)"
 # 只扫描"命令位"（行首/管道/&&/||/子shell/控制关键字之后）的 token，
@@ -80,7 +86,12 @@ called="$(perl -ne '
         print "$1\n";
     }
 ' "$OUT" | sort -u)"
-undefined="$(comm -23 <(printf '%s\n' "$called") <(printf '%s\n' "$defined"))"
+# 不再用 <(...) 进程替换：没有 /dev/fd 的环境（busybox、部分容器）会静默拿到空集合并通过
+scan_tmp="$(mktemp -d)" || exit 1
+printf '%s\n' $called > "$scan_tmp/called"
+printf '%s\n' $defined > "$scan_tmp/defined"
+undefined="$(comm -23 "$scan_tmp/called" "$scan_tmp/defined")"
+rm -rf "$scan_tmp"
 if [[ -n "$undefined" ]]; then
     echo "✗ 发现未定义函数："
     printf '  %s\n' $undefined

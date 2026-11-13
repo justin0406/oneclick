@@ -7,7 +7,7 @@
 把 VLESS-Reality、Hysteria2、Snell v6、SS-Rust、AnyTLS 五种服务端收进同一个命令行工具：
 安装、改端口、换证书、生成订阅、备份恢复、卸载，都在一个菜单里完成，不依赖任何面板。
 
-- 单文件发行：`dist/oneclick.sh`，约 6000 行，下载后即可运行
+- 单文件发行：`dist/oneclick.sh`，约 5900 行，下载后即可运行
 - Debian 13 / Ubuntu 22.04+ 优先，CentOS Stream / RHEL 9 兼容
 - x86_64 / aarch64 / armv7l（AnyTLS 的 sing-box 不提供 i386）
 
@@ -128,5 +128,7 @@ src/99-menu.sh              菜单、CLI、main
 设计参考了 [Misaka-blog/hysteria-install](https://github.com/Misaka-blog/hysteria-install)、
 翠花 Snell.sh、[xOS/Shadowsocks-Rust](https://github.com/xOS/Shadowsocks-Rust)、
 [jinqians 一键菜单](https://menu.jinqians.com)、[mozisen/surge](https://github.com/mozisen/surge)。
-上游均未声明许可证，本仓库不授予再分发权；运行时组件（Xray、Hysteria、sing-box 等）各自遵循其原始许可。
-详见 [NOTICE.md](NOTICE.md)。
+没有复制上游代码（它们均未声明许可证，只作设计参考），本仓库的代码是重写的。
+
+本仓库自身代码采用 **MIT** 许可，见 [LICENSE](LICENSE)；
+运行时组件（Xray、Hysteria、sing-box 等）各自遵循其原始许可。详见 [NOTICE.md](NOTICE.md)。

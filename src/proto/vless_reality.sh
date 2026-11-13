@@ -66,11 +66,16 @@ ocp_vless_reality_port() {
     printf '%s' "$port"
 }
 
-# 输出 "serverName dest"（空格分隔）。dest 缺省补 :443。
+# 询问 dest / SNI，结果写入全局 VLR_SNI、VLR_DEST（dest 缺省补 :443）。
+# 不用 $(...) 包住提问：提示与 read 都在当前 shell 里直接执行，
+# 终端上一定看得见；以前写成 read ... <<< "$(ocp_vless_reality_dest)" 时，
+# 子壳里的提示会丢，表现成"安装无声卡住、按一次回车才继续"。
 ocp_vless_reality_dest() {
     local def="${OC_ARG_SNI:-www.microsoft.com}" input sni dest
-    oc_warn "提示：dest 必须是未过 CDN 的真实站点，套了 CDN 会破坏 REALITY 的 TLS 指纹"
-    input="$(oc_ask "REALITY 伪装域名（回车用默认，真实域名不能过 CDN）" "$def")"
+    VLR_SNI=""
+    VLR_DEST=""
+    oc_info "REALITY 需要一个未过 CDN 的真实站点做伪装目标（dest）"
+    oc_ask_into input "REALITY 伪装域名（回车用默认，真实域名不能过 CDN）" "$def"
     input="$(printf '%s' "$input" | tr -d '[:space:]')"
     [[ -z "$input" ]] && input="$def"
     if [[ "$input" == *:* ]]; then
@@ -82,7 +87,8 @@ ocp_vless_reality_dest() {
     fi
     [[ "$sni" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || oc_die "域名格式不合法：$sni"
     [[ "$sni" == *.* ]] || oc_die "域名格式不合法（需要含点）：$sni"
-    printf '%s %s\n' "$sni" "$dest"
+    VLR_SNI="$sni"
+    VLR_DEST="$dest"
 }
 
 # 写 inbounds[0] + 基本 direct/block 出站；600；先写临时文件再 mv。
@@ -189,6 +195,14 @@ proto_vless_reality_install() {
     # 端口先判，避免下载完才发现被占用
     port="$(ocp_vless_reality_port)" || return 1
 
+    # dest 与端口一起问完再下载：以前放在下载之后，是唯一"下载完才突然要输入"的提问，
+    # 提示又被 $(...) 吞掉，实际表现就是安装无声卡住、按一次回车才继续。
+    ocp_vless_reality_dest
+    sni="$VLR_SNI"
+    dest="$VLR_DEST"
+    [[ -n "$sni" && -n "$dest" ]] || oc_die "REALITY dest 获取失败"
+    oc_kv "伪装目标" "$dest"
+
     bin="$OC_BIN_DIR/xray"
     if [[ -x "$bin" ]] && "$bin" version >/dev/null 2>&1; then
         ver="$("$bin" version 2>/dev/null | head -n1 | awk '{print $2}')"
@@ -245,9 +259,6 @@ proto_vless_reality_install() {
     db_set "$key" public_key "$pub"
     db_set "$key" uuid "$uuid"
     db_set "$key" short_id "$sid"
-
-    read -r sni dest <<< "$(ocp_vless_reality_dest)"
-    [[ -n "$sni" && -n "$dest" ]] || oc_die "REALITY dest 获取失败"
 
     dir="$(oc_proto_dir "$key")"
     if ! cfg="$(ocp_vless_reality_cfg_write "$port" "$uuid" "$priv" "$sni" "$sid" "$dest")"; then

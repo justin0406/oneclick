@@ -318,19 +318,24 @@ _bk_backup() {
 }
 
 _bk_restore() {
-    local f bad
+    local f bad members
     f="$(oc_ask "备份文件路径" "")"
     [[ -f "$f" ]] || { oc_err "文件不存在"; return 1; }
     # 解压目标是 /，而 GNU tar 不会拦 ../ 之类的成员名：先列出成员逐个校验，
     # 只允许 etc/oneclick 下的内容，避免恶意/损坏的备份写到任意路径。
-    if ! bad="$(tar -tzf "$f" 2>/dev/null | awk '
-        /^\// { print; next }                        # 绝对路径
-        /(^|\/)\.\.(\/|$)/ { print; next }           # 路径穿越
-        $0 !~ /^etc\/oneclick(\/|$)/ { print; next }  # 越界内容
-    ' | head -5)"; then
+    # 注意先单独跑 tar：管道里 $? 是 awk 的，tar 损坏会被吞掉。
+    members="$(mktemp)" || return 1
+    if ! tar -tzf "$f" > "$members" 2>/dev/null; then
+        rm -f "$members"
         oc_err "备份包无法读取（不是有效 tar.gz？）"
         return 1
     fi
+    bad="$(awk '
+        /^\// { print; next }                        # 绝对路径
+        /(^|\/)\.\.(\/|$)/ { print; next }           # 路径穿越
+        $0 !~ /^etc\/oneclick(\/|$)/ { print; next }  # 越界内容
+    ' "$members" | head -5)"
+    rm -f "$members"
     if [[ -n "$bad" ]]; then
         oc_err "备份包含有非法或越界的成员，已拒绝解压："
         printf '  %s\n' $bad >&2
@@ -548,8 +553,18 @@ cli_link() {
     case "${OC_ARG_FORMAT:-uri}" in
         uri|"") oc_call "$k" link ;;
         clash)  oc_call "$k" clash ;;
-        surge)  oc_call "$k" surge ;;
-        loon)   oc_call "$k" loon ;;
+        surge)
+            # Surge 没有 VLESS 策略类型：share_render_surge 里是跳过，这里直接说清楚，
+            # 否则会撞上不存在的 proto_vless_reality_surge，报 command not found。
+            if [[ "$k" == "vless_reality" ]]; then
+                oc_die "Surge 没有 VLESS 策略类型；VLESS-Reality 请用 --format clash|loon|singbox|uri"
+            fi
+            oc_call "$k" surge ;;
+        loon)
+            if [[ "$k" == "snell" ]]; then
+                oc_die "Loon 不支持 Snell；Snell 请用 --format surge|clash|singbox|uri"
+            fi
+            oc_call "$k" loon ;;
         singbox|sing-box) oc_call "$k" singbox ;;
         qr) oc_call "$k" link | head -1 | while read -r l; do share_qr "$l"; done ;;
         *) oc_die "未知格式：$OC_ARG_FORMAT（uri|clash|surge|loon|singbox|qr）" ;;
@@ -633,6 +648,8 @@ main() {
         version) printf 'oneclick %s\n' "$OC_VERSION"; return 0 ;;
     esac
     oc_require_root
+    # --purge 例外：没有 systemd 的机器也要能把以前的残留清掉
+    [[ "$OC_CLI_ACTION" == "purge" ]] || oc_require_systemd
     oc_self_update
     os_detect
     export DEBIAN_FRONTEND=noninteractive

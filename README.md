@@ -8,7 +8,7 @@ It puts five server implementations behind a single CLI: VLESS-Reality, Hysteria
 SS-Rust and AnyTLS. Install, change ports, rotate certificates, generate client configs,
 back up and restore, or uninstall — all from one menu. No panel required.
 
-- Single-file release: `dist/oneclick.sh`, ~5,800 lines, run it right after download
+- Single-file release: `dist/oneclick.sh`, ~5,900 lines, run it right after download
 - Debian 13 / Ubuntu 22.04+ first, CentOS Stream / RHEL 9 compatible
 - x86_64 / aarch64 / armv7l (sing-box, used by AnyTLS, has no i386 build)
 
@@ -167,6 +167,9 @@ Every release is verified end-to-end on a fresh Debian 13 (trixie) VPS before it
 The design borrows from [Misaka-blog/hysteria-install](https://github.com/Misaka-blog/hysteria-install),
 翠花's Snell.sh, [xOS/Shadowsocks-Rust](https://github.com/xOS/Shadowsocks-Rust),
 [jinqians' menu](https://menu.jinqians.com) and [mozisen/surge](https://github.com/mozisen/surge).
-None of the upstream projects declared a license, so this repository grants no redistribution rights;
-runtime components (Xray, Hysteria, sing-box, …) remain under their own licenses.
+No upstream code is copied — their repositories declared no license, so they were used as
+design reference only, and everything here is a reimplementation.
+
+This repository's own code is **MIT** (see [LICENSE](LICENSE)).
+Runtime components (Xray, Hysteria, sing-box, …) remain under their own licenses.
 See [NOTICE.md](NOTICE.md) for details.
