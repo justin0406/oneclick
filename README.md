@@ -41,7 +41,7 @@ sudo oc --link snell --format surge
 |---|---|---|---|---|
 | VLESS-Reality | xray-core | 443 by default (or random) | not needed | REALITY + x25519, strongest against active probing; good default |
 | Hysteria2 | hysteria | random high UDP | self-signed / ACME / existing | QUIC, good on lossy links; salamander obfuscation and port hopping optional |
-| Snell v6 | snell-server 6.0.0 | random high TCP | not needed | single port, PSK auth, native Surge support |
+| Snell v5 / v6 | snell-server 5.0.1 / 6.0.0 | random high | not needed | single port, PSK auth, native Surge support; v5 is QUIC (TCP+UDP) and the only option on armv7l |
 | SS-Rust | ssserver | random high TCP + UDP | only for ShadowTLS | SS2022 by default; ShadowTLS v3 (strict) available as an opt-in disguise, off by default. Client must support v3 (e.g. mihomo / Clash Meta) |
 | AnyTLS | sing-box | random high TCP | **required**: self-signed / ACME / existing | low-fingerprint TLS proxy; works with Surge, Loon and sing-box clients |
 
@@ -108,6 +108,13 @@ backup is kept until the new one is proven running, because for kernels without 
 
 Snell is the exception: `dl.nssurge.com` publishes no version index, so `--upgrade snell` needs an
 explicit `--kernel-version X.Y.Z` instead of discovering the latest.
+
+**Snell v5 vs v6.** Pick with `--snell-version 5|6` (or answer the prompt). v6 is plain TCP with
+`mode`; v5 is a **QUIC** proxy that needs both TCP and UDP inbound open, and is the only version with
+an armv7l build. The two use different config keys (`mode` vs `obfs`), so the config is rewritten on
+switch, and client output follows the installed version. Note that sing-box's snell outbound supports
+v4/v6 but **not v5** — `--format singbox` fails with an explanation rather than emitting a config that
+will not start; use Surge/Clash for v5.
 
 **Single user by design.** No multi-user accounts, traffic accounting, expiry dates or Telegram bot —
 those belong in a panel. This script's job is to install and operate one machine's proxies well.

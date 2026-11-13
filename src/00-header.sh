@@ -17,7 +17,7 @@ if (( BASH_VERSINFO[0] < 4 )); then
     exit 1
 fi
 
-OC_VERSION="0.6.0"
+OC_VERSION="0.7.0"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -48,6 +48,7 @@ OC_ARG_METHOD=""
 OC_ARG_CERT_MODE=""
 OC_ARG_FORMAT=""
 OC_ARG_VERSION=""
+OC_ARG_SNELL_MAJOR=""
 OC_CLI_ACTION=""
 OC_CLI_KEY=""
 # 原始参数（自动更新后 exec 自身时复用）
@@ -59,7 +60,7 @@ OC_PROTOS=(vless_reality hysteria2 snell ss_rust anytls)
 declare -gA OC_PROTO_TITLE=(
     [vless_reality]="VLESS-Reality"
     [hysteria2]="Hysteria2"
-    [snell]="Snell v6"
+    [snell]="Snell"
     [ss_rust]="SS-Rust"
     [anytls]="AnyTLS"
 )

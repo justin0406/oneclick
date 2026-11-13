@@ -583,7 +583,17 @@ _cli_upgrade() {
         return "$rc"
     fi
     db_is_installed "$OC_CLI_KEY" || oc_die "$(oc_title_of "$OC_CLI_KEY") 未安装（升级只对已装协议有效）"
-    oc_call "$OC_CLI_KEY" upgrade ${OC_ARG_VERSION:+"$OC_ARG_VERSION"}
+    # --snell-version 优先于 --kernel-version：前者是"切大版本"，会解析成具体发行版
+    local target="${OC_ARG_VERSION:-}"
+    if [[ "$OC_CLI_KEY" == "snell" && -n "$OC_ARG_SNELL_MAJOR" ]]; then
+        local m
+        m="$(ocp_snell_major_of "$OC_ARG_SNELL_MAJOR")" || {
+            oc_die "--snell-version 只能是 5 或 6（收到：$OC_ARG_SNELL_MAJOR）"
+        }
+        target="${OC_SNELL_RELEASE[$m]:-}"
+        [[ -n "$target" ]] || oc_die "代码内没有 v${m} 的发行版记录"
+    fi
+    oc_call "$OC_CLI_KEY" upgrade ${target:+"$target"}
 }
 
 cli_link() {
@@ -639,6 +649,8 @@ OneClick 一键多协议代理安装器
   oneclick --regen <key>
   oneclick --upgrade <key|all>                 升级已装协议的内核（备份/自检/失败回滚）
   oneclick --upgrade snell --kernel-version X.Y.Z  snell 无版本接口，需显式指定
+  oneclick --install snell --snell-version 5|6    选择 Snell 大版本（v5=QUIC 需 TCP+UDP，v6=纯 TCP）
+  oneclick --upgrade snell --snell-version 5|6    切换 Snell 大版本
   oneclick --link <key> [--format uri|clash|surge|loon|singbox|qr]
   oneclick --status [--format json]
   oneclick --list
@@ -668,6 +680,7 @@ oc_parse_args() {
             --cert-mode) [[ -n "${2:-}" ]] || oc_die "--cert-mode 需要值"; OC_ARG_CERT_MODE="$2"; shift 2 ;;
             --format) [[ -n "${2:-}" ]] || oc_die "--format 需要值"; OC_ARG_FORMAT="$2"; shift 2 ;;
             --kernel-version) [[ -n "${2:-}" ]] || oc_die "--kernel-version 需要版本号"; OC_ARG_VERSION="$2"; shift 2 ;;
+            --snell-version) [[ -n "${2:-}" ]] || oc_die "--snell-version 需要 5 或 6"; OC_ARG_SNELL_MAJOR="$2"; shift 2 ;;
             -y|--yes) OC_YES=1; shift ;;
             *) oc_die "未知参数：$1（--help 查看用法）" ;;
         esac

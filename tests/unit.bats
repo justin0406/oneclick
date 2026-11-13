@@ -583,3 +583,92 @@ EOS
     [[ "$body" == *'sha256:'* ]] || { echo "未处理 sha256: 前缀"; return 1; }
     [[ "$body" == *'select(.name == $a)'* ]] || { echo "未按资产名精确匹配"; return 1; }
 }
+
+# ---------- Snell 大版本选择（v5 / v6） ----------
+
+@test "snell_major_of_normalizes_input" {
+    [ "$(ocp_snell_major_of 5)" = "5" ]      || { echo "5 失败"; return 1; }
+    [ "$(ocp_snell_major_of v5)" = "5" ]     || { echo "v5 失败"; return 1; }
+    [ "$(ocp_snell_major_of 5.0.1)" = "5" ]  || { echo "5.0.1 失败"; return 1; }
+    [ "$(ocp_snell_major_of v6.0.0)" = "6" ] || { echo "v6.0.0 失败"; return 1; }
+    run ocp_snell_major_of 7
+    [ "$status" -ne 0 ] || { echo "7 应被拒"; return 1; }
+    run ocp_snell_major_of abc
+    [ "$status" -ne 0 ] || { echo "abc 应被拒"; return 1; }
+}
+
+@test "snell_v5_has_armv7l_but_v6_does_not" {
+    # v5 有 armv7l 构建，v6 没有——这是选 v5 的主要理由
+    [ "$(ocp_snell_dl_arch armv7l 5)" = "armv7l" ] || { echo "v5 应支持 armv7l"; return 1; }
+    run ocp_snell_dl_arch armv7l 6
+    [ "$status" -ne 0 ] || { echo "v6 不该声称支持 armv7l"; return 1; }
+}
+
+@test "snell_version_supported_filters_by_arch" {
+    OC_ARCH=armv7l
+    run ocp_snell_version_supported 6
+    [ "$status" -ne 0 ] || { echo "armv7l 上 v6 应不可用"; return 1; }
+    run ocp_snell_version_supported 5
+    [ "$status" -eq 0 ] || { echo "armv7l 上 v5 应可用"; return 1; }
+    OC_ARCH=amd64
+    run ocp_snell_version_supported 6
+    [ "$status" -eq 0 ] || { echo "amd64 上 v6 应可用"; return 1; }
+}
+
+@test "snell_v5_config_uses_obfs_not_mode" {
+    local dir="${BATS_TEST_TMPDIR}/sn5"
+    mkdir -p "$dir"
+    OC_ROOT="$dir"
+    ocp_snell_write_config 12345 testpsk1234567890 5 http www.bing.com
+    local cfg="$dir/snell/snell-server.conf"
+    [ -f "$cfg" ] || { echo "配置未生成"; return 1; }
+    grep -q '^obfs = http' "$cfg" || { echo "v5 缺 obfs"; return 1; }
+    grep -q '^obfs-host = www.bing.com' "$cfg" || { echo "v5 缺 obfs-host"; return 1; }
+    if grep -q '^mode =' "$cfg"; then echo "v5 不该写 mode"; return 1; fi
+}
+
+@test "snell_v6_config_uses_mode_not_obfs" {
+    local dir="${BATS_TEST_TMPDIR}/sn6"
+    mkdir -p "$dir"
+    OC_ROOT="$dir"
+    ocp_snell_write_config 12345 testpsk1234567890 6 http www.bing.com
+    local cfg="$dir/snell/snell-server.conf"
+    [ -f "$cfg" ] || { echo "配置未生成"; return 1; }
+    grep -q '^mode = default' "$cfg" || { echo "v6 缺 mode"; return 1; }
+    if grep -q '^obfs' "$cfg"; then echo "v6 不该写 obfs"; return 1; fi
+}
+
+@test "snell_singbox_rejects_v5" {
+    # sing-box 的 snell outbound 只支持 v4/v6，v5 必须明确报错
+    write_db '{"installed":["snell"],"settings":{"ip":"1.2.3.4"},
+      "snell":{"port":"8388","psk":"testpsk1234567890","version":"5.0.1","major":"5"}}'
+    run proto_snell_singbox
+    [ "$status" -ne 0 ] || { echo "v5 不该产出 sing-box 配置"; return 1; }
+    [[ "$output" == *"不支持"* ]] || { echo "未给出说明"; return 1; }
+}
+
+@test "snell_surge_version_follows_db" {
+    write_db '{"installed":["snell"],"settings":{"ip":"1.2.3.4"},
+      "snell":{"port":"8388","psk":"testpsk1234567890","version":"5.0.1","major":"5"}}'
+    run proto_snell_surge
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"version=5"* ]] || { echo "v5 未写 version=5：$output"; return 1; }
+    [[ "$output" != *"mode="* ]] || { echo "v5 不该带 mode"; return 1; }
+}
+
+@test "snell_node_name_reflects_installed_major" {
+    write_db '{"installed":["snell"],"settings":{"ip":"1.2.3.4"},
+      "snell":{"port":"8388","psk":"testpsk1234567890","version":"5.0.1","major":"5"}}'
+    [ "$(ocp_snell_name)" = "Snell v5" ] || { echo "得到：$(ocp_snell_name)"; return 1; }
+}
+
+@test "snell_sha_table_covers_both_majors" {
+    local v
+    for v in 6.0.0 5.0.1; do
+        [[ -n "${OC_SNELL_SHA256[snell-server-v${v}-linux-amd64.zip]:-}" ]] || {
+            echo "缺 v$v amd64 哈希"; return 1; }
+    done
+    # v5 必须有 armv7l
+    [[ -n "${OC_SNELL_SHA256[snell-server-v5.0.1-linux-armv7l.zip]:-}" ]] || {
+        echo "缺 v5 armv7l 哈希"; return 1; }
+}
