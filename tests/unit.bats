@@ -400,3 +400,39 @@ EOF
     grep -q 'ocp_hy2_clean_hop_rules' "$src/99-menu.sh" || {
         echo "purge 路径未兜底清理 nft 规则"; return 1; }
 }
+
+# ---------- Loon VLESS 行必须用合法的 tls-profile ----------
+# 曾经输出 tls-profile=chrome（裸名），Loon 只认 TLS / chrome147 / safari-ios-26。
+# REALITY 依赖客户端 TLS 指纹，指纹名不被识别时握手直接失败——
+# 表现为"AnyTLS 能连、VLESS 连不上"。
+
+@test "loon_vless_uses_valid_tls_profile" {
+    write_db '{"installed":["vless_reality"],"settings":{"ip":"1.2.3.4"},
+      "vless_reality":{"port":"443","uuid":"11111111-2222-3333-4444-555555555555",
+      "server_name":"www.microsoft.com","short_id":"5ae06551",
+      "public_key":"qxnmPvI1Ku9BIZhNhZZS14F-jfrdz_URYf80AoruNEA"}}'
+    run proto_vless_reality_loon
+    [ "$status" -eq 0 ] || { echo "生成失败"; return 1; }
+    local tp
+    tp="$(printf '%s' "$output" | grep -oE 'tls-profile=[^,]+')"
+    case "$tp" in
+        tls-profile=TLS|tls-profile=chrome147|tls-profile=safari-ios-26) ;;
+        *) echo "tls-profile 非法：[$tp]（Loon 只认 TLS / chrome147 / safari-ios-26）"; return 1 ;;
+    esac
+}
+
+@test "loon_vless_has_reality_required_params" {
+    write_db '{"installed":["vless_reality"],"settings":{"ip":"1.2.3.4"},
+      "vless_reality":{"port":"443","uuid":"11111111-2222-3333-4444-555555555555",
+      "server_name":"www.microsoft.com","short_id":"5ae06551",
+      "public_key":"qxnmPvI1Ku9BIZhNhZZS14F-jfrdz_URYf80AoruNEA"}}'
+    run proto_vless_reality_loon
+    [ "$status" -eq 0 ]
+    # REALITY over TCP 的必需项，缺任何一个都连不上
+    [[ "$output" == *"transport=tcp"* ]]        || { echo "缺 transport=tcp"; return 1; }
+    [[ "$output" == *"over-tls=true"* ]]        || { echo "缺 over-tls=true"; return 1; }
+    [[ "$output" == *"flow=xtls-rprx-vision"* ]] || { echo "缺 flow"; return 1; }
+    [[ "$output" == *"public-key="* ]]          || { echo "缺 public-key"; return 1; }
+    [[ "$output" == *"short-id="* ]]            || { echo "缺 short-id"; return 1; }
+    [[ "$output" == *"sni="* ]]                 || { echo "缺 sni"; return 1; }
+}

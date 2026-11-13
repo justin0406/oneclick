@@ -17,7 +17,7 @@ if (( BASH_VERSINFO[0] < 4 )); then
     exit 1
 fi
 
-OC_VERSION="0.4.5"
+OC_VERSION="0.4.6"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"

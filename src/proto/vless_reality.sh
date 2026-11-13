@@ -547,8 +547,10 @@ proto_vless_reality_loon() {
     pub="$(db_get "$key" public_key "")"
     [[ -n "$ip" && -n "$uuid" && -n "$sid" && -n "$pub" ]] || return 1
     name="$(oc_loon_name "$key")"
-    # 不加 udp=true：Loon 的 VLESS 节点没有这个参数（参照 Sub-Store 的 Loon 生成器，
-    # 它只在 shadowsocks 一类的节点上输出 udp），多带一个未知键会让节点解析不完整。
-    printf '%s = VLESS,%s,%s,"%s",transport=tcp,over-tls=true,tls-profile=chrome,flow=xtls-rprx-vision,sni=%s,public-key="%s",short-id=%s\n' \
-        "$name" "$ip" "$port" "$uuid" "$sni" "$pub" "$sid"
+    # 参数顺序与取值对齐 Loon 官方示例（LoonExampleConfig/Nodes/ExampleNodes.list
+    # 的 vlessReality 行）：flow 紧跟 transport；tls-profile 必须是带版本号的
+    # 具体指纹（chrome147 / safari-ios-26 之类），裸 "chrome" 不是合法值——
+    # REALITY 依赖客户端 TLS 指纹，指纹名不被识别时握手直接失败。
+    printf '%s = VLESS,%s,%s,"%s",transport=tcp,flow=xtls-rprx-vision,over-tls=true,public-key="%s",short-id=%s,sni=%s,tls-profile=chrome147,udp=true,block-quic=false\n' \
+        "$name" "$ip" "$port" "$uuid" "$pub" "$sid" "$sni"
 }
