@@ -535,7 +535,9 @@ reality_keypair() {
         fi
         if [[ -n "$priv" && -n "$pub" ]]; then
             _cert_write_json "$outfile" "$priv" "$pub" || { oc_err "reality_keypair: 写入 $outfile 失败"; return 1; }
-            oc_ok "REALITY 密钥对已写入：$outfile"
+            # 本函数的 stdout 会被调用方用 $() 捕获（ocp_vless_reality_keys），
+            # 提示必须走 stderr，否则这行文字会被当成密钥内容。
+            oc_ok "REALITY 密钥对已写入：$outfile" >&2
             return 0
         fi
         oc_warn "xray x25519 输出无法解析，改用 openssl 生成私钥"

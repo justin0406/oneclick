@@ -26,6 +26,8 @@ ocp_vless_reality_keys() {
         oc_err "REALITY 密钥解析失败（xray x25519 输出格式未知）"
         return 1
     fi
+    # 只输出两行纯密钥。调用方用 $() 捕获本函数的 stdout，
+    # 任何多余输出（提示/日志）都会被当成私钥或公钥写进配置。
     printf '%s\n%s\n' "$priv" "$pub"
 }
 

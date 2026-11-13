@@ -17,7 +17,7 @@ if (( BASH_VERSINFO[0] < 4 )); then
     exit 1
 fi
 
-OC_VERSION="0.4.3"
+OC_VERSION="0.4.4"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -1554,7 +1554,9 @@ reality_keypair() {
         fi
         if [[ -n "$priv" && -n "$pub" ]]; then
             _cert_write_json "$outfile" "$priv" "$pub" || { oc_err "reality_keypair: 写入 $outfile 失败"; return 1; }
-            oc_ok "REALITY 密钥对已写入：$outfile"
+            # 本函数的 stdout 会被调用方用 $() 捕获（ocp_vless_reality_keys），
+            # 提示必须走 stderr，否则这行文字会被当成密钥内容。
+            oc_ok "REALITY 密钥对已写入：$outfile" >&2
             return 0
         fi
         oc_warn "xray x25519 输出无法解析，改用 openssl 生成私钥"
@@ -2028,6 +2030,8 @@ ocp_vless_reality_keys() {
         oc_err "REALITY 密钥解析失败（xray x25519 输出格式未知）"
         return 1
     fi
+    # 只输出两行纯密钥。调用方用 $() 捕获本函数的 stdout，
+    # 任何多余输出（提示/日志）都会被当成私钥或公钥写进配置。
     printf '%s\n%s\n' "$priv" "$pub"
 }
 

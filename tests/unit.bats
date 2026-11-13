@@ -326,3 +326,42 @@ EOF
     [ "$status" -eq 0 ]
     [ "$(printf '%s' "$output" | jq -r .tag)" = "Hysteria2" ]
 }
+
+# ---------- REALITY 密钥：函数 stdout 必须只有两行纯密钥 ----------
+# 曾经 reality_keypair 成功时把 "[✓] ...已写入" 打到 stdout，
+# 调用方 $() 捕获后把这行日志当成了私钥写进 config.json（xray 报 invalid privateKey）。
+
+@test "reality_keypair_stdout_is_not_polluted" {
+    local dir="${BATS_TEST_TMPDIR}/rk"
+    mkdir -p "$dir"
+    local out
+    out="$(reality_keypair "$dir/k.json" 2>/dev/null)" || skip "无法生成 REALITY 密钥"
+    # stdout 必须为空：所有提示都走 stderr
+    [ -z "$out" ] || { echo "stdout 被污染：[$out]"; return 1; }
+}
+
+@test "reality_keypair_writes_parseable_json" {
+    local dir="${BATS_TEST_TMPDIR}/rk2"
+    mkdir -p "$dir"
+    reality_keypair "$dir/k.json" >/dev/null 2>&1 || skip "无法生成 REALITY 密钥"
+    [ -f "$dir/k.json" ] || { echo "未写出文件"; return 1; }
+    local priv pub
+    priv="$(jq -r '.privateKey // empty' "$dir/k.json")"
+    pub="$(jq -r '.publicKey // empty' "$dir/k.json")"
+    # 密钥是 base64url，不含空格/冒号/中文；日志文本会包含这些
+    [[ "$priv" =~ ^[A-Za-z0-9_-]{40,}$ ]] || { echo "privateKey 形状异常：[$priv]"; return 1; }
+    [[ "$pub"  =~ ^[A-Za-z0-9_-]{40,}$ ]] || { echo "publicKey 形状异常：[$pub]"; return 1; }
+}
+
+@test "vless_keys_output_has_exactly_two_lines" {
+    # 没有 xray 时 reality_keypair 只回退到"只有私钥"分支，公钥拿不到，
+    # ocp_vless_reality_keys 必然失败——本机无 xray 就跳过。
+    command -v xray >/dev/null 2>&1 || [[ -x "${OC_BIN_DIR}/xray" ]] || skip "本机无 xray，跳过"
+    local kp rc
+    kp="$(ocp_vless_reality_keys 2>/dev/null)" && rc=0 || rc=$?
+    if [[ $rc -ne 0 ]]; then skip "REALITY 密钥生成失败（rc=$rc）"; fi
+    [ "$(printf '%s\n' "$kp" | wc -l | tr -d ' ')" -eq 2 ] || {
+        echo "应为两行，实际：[$kp]"; return 1; }
+    # 两行都必须是纯密钥，不能含提示文本
+    [[ "$kp" != *"✓"* ]] || { echo "混入了日志文本：[$kp]"; return 1; }
+}
