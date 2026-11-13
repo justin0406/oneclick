@@ -17,7 +17,7 @@ if (( BASH_VERSINFO[0] < 4 )); then
     exit 1
 fi
 
-OC_VERSION="0.4.2"
+OC_VERSION="0.4.3"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -2045,25 +2045,36 @@ ocp_vless_reality_port() {
             port=443
         else
             port="$(net_port_random)"
-            oc_info "已选随机高位端口：$port"
+            # 本函数的返回值就是端口（通过 stdout 传出），提示必须走 stderr，
+            # 否则会拼进返回值，校验时被判成"端口必须是数字"，安装直接静默结束。
+            oc_info "已选随机高位端口：$port" >&2
         fi
     fi
     port="$(printf '%s' "$port" | tr -d '[:space:]')"
-    [[ "$port" =~ ^[0-9]+$ ]] || oc_die "端口必须是数字：$port"
-    ((port >= 1 && port <= 65535)) || oc_die "端口超出范围：$port"
+    if [[ -z "$port" ]]; then
+        oc_err "没有找到可用端口（可指定 --port N）"
+        return 1
+    fi
+    [[ "$port" =~ ^[0-9]+$ ]] || { oc_err "端口必须是数字：$port"; return 1; }
+    ((port >= 1 && port <= 65535)) || { oc_err "端口超出范围：$port"; return 1; }
     if net_port_in_use "$port" tcp; then
         if [[ -n "$OC_ARG_PORT" ]]; then
             alt="$(net_port_pick "$port" tcp)"
-            oc_die "端口 $port 已被占用（--port 指定）；可换空闲端口，例如 --port ${alt:-$def}"
+            oc_err "端口 $port 已被占用（--port 指定）；可换空闲端口，例如 --port ${alt:-$def}"
+            return 1
         fi
         oc_warn "端口 $port 已被占用；VLESS-Reality 需要一个独占端口"
         alt="$(net_port_random)"
-        [[ -z "$alt" ]] && oc_die "找不到可用端口，已取消安装"
+        if [[ -z "$alt" ]]; then
+            oc_err "找不到可用端口，已取消安装"
+            return 1
+        fi
         if ! oc_confirm "改用随机高位端口 $alt ？" y; then
-            oc_die "已取消安装"
+            oc_err "已取消安装"
+            return 1
         fi
         port="$alt"
-        oc_info "改用端口：$port"
+        oc_info "改用端口：$port" >&2
     fi
     printf '%s' "$port"
 }
