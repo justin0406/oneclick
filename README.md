@@ -4,11 +4,11 @@
 
 **One-click multi-protocol proxy installer** — one script, one entry point, one certificate and state layer.
 
-It puts five server implementations behind a single CLI: VLESS-Reality, Hysteria2, Snell v6,
-SS-Rust and AnyTLS. Install, change ports, rotate certificates, generate client configs,
-back up and restore, or uninstall — all from one menu. No panel required.
+It puts five server implementations behind a single CLI: VLESS-Reality, Hysteria2, Snell,
+SS-Rust and AnyTLS. Install, change ports, rotate credentials, upgrade kernels, generate client
+configs, back up and restore, or uninstall — all from one menu. No panel required.
 
-- Single-file release: `dist/oneclick.sh`, ~5,900 lines, run it right after download
+- Single-file release: `dist/oneclick.sh`, ~7,200 lines, run it right after download
 - Debian 13 / Ubuntu 22.04+ first, CentOS Stream / RHEL 9 compatible
 - x86_64 / aarch64 / armv7l (sing-box, used by AnyTLS, has no i386 build)
 
@@ -60,10 +60,10 @@ server-side signal for client capability. For clients without SS2022, pass
 
 ## Design principles
 
-**Protocols are plugins.** Every protocol implements the same nine functions
-(`meta / install / uninstall / status / link / regen / clash / surge / singbox`). The menu, subscription
-and status layers only walk a registry; they never know which protocol they are dealing with.
-Adding a protocol means adding one file and registering one key.
+**Protocols are plugins.** Every protocol implements the same ten functions
+(`meta / install / uninstall / status / link / regen / upgrade / clash / surge / singbox`). The menu,
+subscription and status layers only walk a registry; they never know which protocol they are dealing
+with. Adding a protocol means adding one file and registering one key.
 
 **You own the certificates.** Every TLS protocol supports three paths: `existing` (paste a certificate
 you already have), `acme` (acme.sh HTTP-01), or `self` (EC P-256 with SAN). A missing certificate never
@@ -72,8 +72,8 @@ numbered menu rather than requiring you to type a mode name.
 
 **Certificates are shared by domain.** A certificate is stored once under `certs/<domain>/` and every
 protocol using that domain points at the same files — the second TLS protocol reuses the first one's
-certificate instead of requesting another, which also avoids Let's Encrypt's rate limit (5 per domain
-per week). acme.sh is told to `systemctl restart` every registered consumer on renewal, so a renewed
+certificate instead of requesting another, which also avoids Let's Encrypt's duplicate-certificate
+limit (the same certificate requested more than 5 times a week is refused). acme.sh is told to `systemctl restart` every registered consumer on renewal, so a renewed
 certificate actually reaches the running services; without that hook a renewed cert sits on disk while
 the service keeps serving the expired one.
 
@@ -87,12 +87,13 @@ no edits to the system SSH configuration, no sysctl tuning. Only exception: if y
 port hopping, hysteria itself installs and cleans up the redirect rules for its `listen` port range.
 
 **Downloads are verifiable.** All binaries go through one download layer: three retries, an optional
-mirror prefix (`OC_GH_PROXY`), SHA-256 verification against the upstream checksum when the project
-publishes one (Xray `.dgst`, Hysteria2 `hashes.txt`, shadowsocks-rust `.sha256`), and rollback on
-failure so no half-written file is left behind. Projects that ship no checksum file (sing-box,
-shadow-tls, Snell) are verified structurally only — the download must be a valid zip/gzip/xz archive
-or ELF binary — so a hostile mirror could still substitute an asset for those. Prefer running without `OC_GH_PROXY` if you cannot
-trust your mirror.
+mirror prefix (`OC_GH_PROXY`), `Cache-Control: no-cache` so a caching mirror cannot serve a stale
+binary, and rollback on failure so no half-written file is left behind. Verification, in order of
+preference: the GitHub release API's per-asset `digest` (works for any tag); the upstream checksum
+file when the project publishes one (Xray `.dgst`, Hysteria2 `hashes.txt`, shadowsocks-rust `.sha256`);
+the SHA-256 table in the code for pinned Snell and sing-box versions; and finally a structural check —
+the download must be a valid zip/gzip/xz archive or ELF binary — which blocks mirror error pages but
+not a hostile substitute. Prefer running without `OC_GH_PROXY` if you cannot trust your mirror.
 
 **It updates itself.** On every run the script fetches `dist/oneclick.sh` from this repository, compares
 the embedded `OC_VERSION`, atomically replaces itself and re-executes the new version immediately
@@ -139,7 +140,7 @@ those belong in a panel. This script's job is to install and operate one machine
 ```
 /etc/oneclick/
 ├── db.json                # single state store (jq atomic writes + flock)
-├── certs/<name>/          # cert.pem / key.pem (0600)
+├── certs/<domain>/        # cert.pem / key.pem (0600); shared by domain
 ├── sub/                   # oneclick-clash.yaml / -surge.conf / -singbox.json / -uri.txt
 └── <protocol key>/        # per-protocol config (0600)
 
@@ -173,18 +174,45 @@ an existing config instead of replacing it.
 - `sub/oneclick-uri.txt` — plain URI list, also usable for QR codes
 - sing-box is not generated by default; use `oneclick --sub --format singbox` if you need it
 
+## Command reference
+
+```
+oneclick                                        interactive menu
+oneclick --install <key> [--port N] [--domain D] [--sni S] [--cert-mode M] [--yes]
+oneclick --install ss_rust [--method chacha20-ietf-poly1305]   legacy-client cipher
+oneclick --install snell --snell-version 5|6    pick the Snell major version
+oneclick --uninstall <key> [--yes]
+oneclick --regen <key>                          rewrite config from the state store
+oneclick --upgrade <key|all> [--kernel-version X.Y.Z]
+                                                upgrade kernels (backup, check, rollback)
+oneclick --upgrade snell --kernel-version X.Y.Z snell has no version index; ask for one
+oneclick --upgrade snell --snell-version 5|6    switch the Snell major version
+oneclick --link <key> [--format uri|clash|surge|loon|singbox|qr]
+oneclick --status [--format json]
+oneclick --list
+oneclick --sub [--format uri|clash|surge|loon|singbox]
+                                                node snippets (sing-box opt-in)
+oneclick --cert-status
+oneclick --purge                                full removal (type PURGE to confirm)
+oneclick --version | --help
+```
+
+Protocol keys: `vless_reality hysteria2 snell ss_rust anytls`. Formats emitting more than one node on
+a dual-stack host print one node per address (see *Layout* below).
+
 ## Build and test
 
 ```bash
 ./build.sh
 ```
 
-The build concatenates 15 modules into `dist/oneclick.sh` and runs four checks: `bash -n`,
+The build concatenates 16 modules into `dist/oneclick.sh` and runs four checks: `bash -n`,
 `shellcheck -S warning`, an undefined-function scan (command positions only, so jq field names are not
 misread), and duplicate-definition detection. Edit `src/`, never `dist/`.
 
-CI (`.github/workflows/build.yml`) runs the same build on every push and additionally fails if
-`dist/oneclick.sh` differs from what `src/` produces, plus a smoke test of `--version` / `--help`.
+CI (`.github/workflows/build.yml`) runs the same build on every push, plus the unit tests, a smoke
+test of `--version` / `--help`, a check that `dist/oneclick.sh` matches what `src/` produces, and a
+check that `README.zh-CN.md` was updated whenever `README.md` changes — the two must travel together.
 
 Requires **bash 4.0+** at runtime (`declare -gA`, `${var,,}`); bash 3.2 — the macOS default — exits
 immediately with a clear message. Every supported Linux target ships bash 4 or newer.
@@ -197,7 +225,7 @@ bats tests/
 
 ```
 src/00-header.sh            constants, protocol registry
-src/lib/{os,ui,store,dl,net,cert,svc,share}.sh
+src/lib/{os,ui,store,dl,net,cert,svc,share,upgrade}.sh
 src/proto/{vless_reality,hysteria2,snell,ss_rust,anytls}.sh
 src/99-menu.sh              menu, CLI, main
 ```
@@ -208,7 +236,9 @@ Every release is verified end-to-end on a fresh Debian 13 (trixie) VPS before it
 
 The design borrows from [Misaka-blog/hysteria-install](https://github.com/Misaka-blog/hysteria-install),
 翠花's Snell.sh, [xOS/Shadowsocks-Rust](https://github.com/xOS/Shadowsocks-Rust),
-[jinqians' menu](https://menu.jinqians.com) and [mozisen/surge](https://github.com/mozisen/surge).
+[jinqians' menu](https://menu.jinqians.com), [mozisen/surge](https://github.com/mozisen/surge), and —
+for the Hysteria2 unit sandbox, upgrade restart semantics and version API — the official
+[get.hy2.sh](https://github.com/apernet/hysteria) installer.
 No upstream code is copied — their repositories declared no license, so they were used as
 design reference only, and everything here is a reimplementation.
 

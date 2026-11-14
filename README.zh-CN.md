@@ -7,7 +7,7 @@
 把 VLESS-Reality、Hysteria2、Snell、SS-Rust、AnyTLS 五种服务端收进同一个命令行工具：
 安装、改端口、换凭据、升级内核、生成客户端配置、备份恢复、卸载，都在一个菜单里完成，不依赖任何面板。
 
-- 单文件发行：`dist/oneclick.sh`，约 5900 行，下载后即可运行
+- 单文件发行：`dist/oneclick.sh`，约 7200 行，下载后即可运行
 - Debian 13 / Ubuntu 22.04+ 优先，CentOS Stream / RHEL 9 兼容
 - x86_64 / aarch64 / armv7l（AnyTLS 的 sing-box 不提供 i386）
 
@@ -55,7 +55,7 @@ SS-Rust 固定使用 SS2022（`2022-blake3-aes-128-gcm`），安装时不再询�
 
 ## 设计原则
 
-**协议插件化。** 每个协议实现同一组 9 个函数（`meta / install / uninstall / status / link / regen / clash / surge / singbox`），
+**协议插件化。** 每个协议实现同一组 10 个函数（`meta / install / uninstall / status / link / regen / upgrade / clash / surge / singbox`），
 菜单、订阅、状态层只遍历注册表，不认识具体协议。新增协议 = 新增一个文件 + 注册一个 key。
 
 **证书自主签发。** 每个需要 TLS 的协议都支持三条路径：`existing`（粘贴已有证书）、`acme`（acme.sh HTTP-01）、
@@ -63,7 +63,8 @@ SS-Rust 固定使用 SS2022（`2022-blake3-aes-128-gcm`），安装时不再询�
 用编号菜单选择，不需要背英文单词。
 
 **证书按域名共用。** 证书在 `certs/<域名>/` 下只存一份，使用同一域名的协议都指向同一组文件——
-第二个 TLS 协议直接复用第一张证书，不再重复申请，也避开了 Let's Encrypt 的签发限额（每域名每周 5 次）。
+第二个 TLS 协议直接复用第一张证书，不再重复申请，也避开了 Let's Encrypt 的重复证书限额
+（同一张证书一周内申请超过 5 次会被拒绝）。
 acme.sh 续期时会 `systemctl restart` 所有登记过的服务，续期后的证书能真正落到运行中的服务上；
 没有这个钩子，证书续期成功但服务还在用旧证书，到期就断。
 
@@ -75,9 +76,11 @@ ACME 需要一个**你自己拥有、且已解析到本机**的域名——没�
 唯一例外：启用 Hysteria2 端口跳跃时，由 hysteria 自己按其 `listen` 端口段安装并清理转发规则。
 
 **下载可验证。** 所有二进制走统一下载层：3 次重试、可选镜像前缀（`OC_GH_PROXY`）、
-上游发布校验文件时做 SHA-256 校验（Xray `.dgst`、Hysteria2 `hashes.txt`、shadowsocks-rust `.sha256`）、
-失败自动回滚，不留下半截文件。不发布校验文件的项目（sing-box、shadow-tls、Snell）只做结构校验——
-下载内容必须是合法的 zip/gzip/xz 压缩包或 ELF 二进制——所以恶意镜像仍可能替换这些资产。
+`Cache-Control: no-cache`（防止缓存镜像返回旧版本二进制）、失败自动回滚不留下半截文件。
+校验按优先级依次尝试：GitHub release API 的逐资产 `digest`（任意版本都可用）→
+上游发布的校验文件（Xray `.dgst`、Hysteria2 `hashes.txt`、shadowsocks-rust `.sha256`）→
+代码内记录的 Snell / sing-box 钉死版本 SHA-256 表 → 结构校验（下载内容必须是合法的
+zip/gzip/xz 压缩包或 ELF 二进制，能挡镜像错误页但挡不住恶意替换）。
 不信任镜像时建议不要设置 `OC_GH_PROXY`。
 
 **自动更新。** 每次运行都会从本仓库读取 `dist/oneclick.sh`，比较内嵌的 `OC_VERSION`，
@@ -116,7 +119,7 @@ v5 是 **QUIC** 代理，需要 TCP 和 UDP 入站都放行，且是唯一提供
 ```
 /etc/oneclick/
 ├── db.json                # 唯一状态库（jq 原子写 + flock）
-├── certs/<域名>/          # cert.pem / key.pem（600），同域名共用
+├── certs/<域名>/          # cert.pem / key.pem（600），按域名共用
 ├── sub/                   # oneclick-clash.yaml / -surge.conf / -singbox.json / -uri.txt
 └── <协议 key>/            # 各协议配置（600）
 
@@ -146,18 +149,43 @@ IPv4 仍可连）；没有 IPv6 栈时自动退回 `0.0.0.0`。Hysteria2 默认�
 - `sub/oneclick-uri.txt` — 通用 URI 列表，可生成二维码
 - sing-box 默认不生成，需要时用 `oneclick --sub --format singbox`
 
+## 命令参考
+
+```
+oneclick                                        交互菜单
+oneclick --install <key> [--port N] [--domain D] [--sni S] [--cert-mode M] [--yes]
+oneclick --install ss_rust [--method chacha20-ietf-poly1305]   老客户端兼容加密方式
+oneclick --install snell --snell-version 5|6    选择 Snell 大版本
+oneclick --uninstall <key> [--yes]
+oneclick --regen <key>                          从状态库重写配置
+oneclick --upgrade <key|all> [--kernel-version X.Y.Z]
+                                                升级内核（备份 / 自检 / 失败回滚）
+oneclick --upgrade snell --kernel-version X.Y.Z snell 无版本接口，需显式指定
+oneclick --upgrade snell --snell-version 5|6    切换 Snell 大版本
+oneclick --link <key> [--format uri|clash|surge|loon|singbox|qr]
+oneclick --status [--format json]
+oneclick --list
+oneclick --sub [--format uri|clash|surge|loon|singbox]
+                                                节点片段（sing-box 需显式指定）
+oneclick --cert-status
+oneclick --purge                                彻底卸载（输入 PURGE 确认）
+oneclick --version | --help
+```
+
+协议 key：`vless_reality hysteria2 snell ss_rust anytls`。双栈主机上所有格式都会按地址各输出一份节点（见下文「目录结构」）。
+
 ## 构建与测试
 
 ```bash
 ./build.sh
 ```
 
-按 15 个模块拼成 `dist/oneclick.sh`，并执行四项校验：`bash -n`、`shellcheck -S warning`、
+按 16 个模块拼成 `dist/oneclick.sh`，并执行四项校验：`bash -n`、`shellcheck -S warning`、
 未定义函数扫描（只扫命令位，避免 jq 字段误报）、重复函数定义。改代码只改 `src/`，不要改 `dist/`。
 
-CI（`.github/workflows/build.yml`）在每次推送时执行同样的构建，另外会检查 `dist/oneclick.sh`
-与 `src/` 产物一致，并跑 `--version` / `--help` 冒烟测试，还会检查改动 `README.md` 时
-`README.zh-CN.md` 是否同步更新。
+CI（`.github/workflows/build.yml`）在每次推送时执行同样的构建与单元测试、`--version` / `--help`
+冒烟测试，检查 `dist/oneclick.sh` 与 `src/` 产物一致，并检查改动 `README.md` 时
+`README.zh-CN.md` 是否同步更新——两份文档必须一起走。
 
 运行时需要 **bash 4.0+**（用到 `declare -gA`、`${var,,}`）；macOS 自带的 bash 3.2 会直接退出并给出明确提示。
 所有受支持的 Linux 发行版都自带 bash 4 以上。
@@ -181,7 +209,9 @@ src/99-menu.sh              菜单、CLI、main
 
 设计参考了 [Misaka-blog/hysteria-install](https://github.com/Misaka-blog/hysteria-install)、
 翠花 Snell.sh、[xOS/Shadowsocks-Rust](https://github.com/xOS/Shadowsocks-Rust)、
-[jinqians 一键菜单](https://menu.jinqians.com)、[mozisen/surge](https://github.com/mozisen/surge)。
+[jinqians 一键菜单](https://menu.jinqians.com)、[mozisen/surge](https://github.com/mozisen/surge)，
+以及官方 [get.hy2.sh](https://github.com/apernet/hysteria) 安装脚本——
+Hysteria2 的 unit 沙箱、升级重启语义与版本查询接口来自它。
 没有复制上游代码（它们均未声明许可证，只作设计参考），本仓库的代码是重写的。
 
 本仓库自身代码采用 **MIT** 许可，见 [LICENSE](LICENSE)；

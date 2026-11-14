@@ -14,6 +14,7 @@ its own official release page.
 | Component | Upstream | Used for |
 |---|---|---|
 | Hysteria2 | [Misaka-blog/hysteria-install](https://github.com/Misaka-blog/hysteria-install) | official install flow, self-signed cert + port hopping |
+| Hysteria2 official installer | [apernet/hysteria](https://github.com/apernet/hysteria) (`get.hy2.sh`) | systemd unit sandbox, upgrade restart semantics, version update API |
 | Snell v6 | 翠花 Snell.sh (`git.io/Snell.sh`) | systemd unit, PSK / mode / version handling |
 | SS-Rust | [xOS/Shadowsocks-Rust](https://github.com/xOS/Shadowsocks-Rust) + [shadowsocks/shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust) | SS2022 config, ShadowTLS v3 |
 | Menu layering | [jinqians](https://menu.jinqians.com) | common library / channel layering idea |
