@@ -17,7 +17,7 @@ if (( BASH_VERSINFO[0] < 4 )); then
     exit 1
 fi
 
-OC_VERSION="0.9.0"
+OC_VERSION="0.9.1"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -649,7 +649,8 @@ dl_fetch() {
     tmp="${out}.part.$$"
     for src in "${urls[@]}"; do
         for attempt in 1 2 3; do
-            if curl -fL --connect-timeout 10 --max-time 900 --retry 1 -o "$tmp" "$src" >/dev/null 2>&1; then
+            # no-cache：get.hy2.sh 同款，防止镜像/CDN 缓存返回旧版本二进制
+            if curl -fL -H 'Cache-Control: no-cache' --connect-timeout 10 --max-time 900 --retry 1 -o "$tmp" "$src" >/dev/null 2>&1; then
                 ok=1; break 2
             fi
             rm -f "$tmp"; sleep 1
@@ -694,7 +695,18 @@ dl_latest_ver() {
     printf '%s' "${t#v}"
 }
 
-# dl_asset_digest <owner/repo> <tag> <asset-name> -> 输出该资产的 sha256（小写十六进制）
+# dl_hy2_latest_tag -> hysteria 官方 update API 的最新 tag（app/vX.Y.Z）
+# GitHub API 有匿名限流（60 次/小时），官方 api.hy2.io 没有限流且离 GitHub
+# 更近——get.hy2.sh 就是用它查版本的。作为 dl_latest_tag 失败时的备用源。
+dl_hy2_latest_tag() {
+    local out
+    out="$(curl -fsS --connect-timeout 10 --max-time 30 \
+        "https://api.hy2.io/v1/update?cver=installscript&plat=linux&arch=${OC_ARCH:-amd64}&chan=release&side=server" 2>/dev/null \
+        | jq -r '.lver // empty' 2>/dev/null)"
+    printf '%s' "$out"
+}
+
+# dl_asset_digest <owner/repo> <tag> <asset-name># dl_asset_digest <owner/repo> <tag> <asset-name> -> 输出该资产的 sha256（小写十六进制）
 #
 # GitHub 的 release API 为每个资产提供 digest 字段（形如 "sha256:<hex>"），
 # 这样任意版本都能动态取到官方哈希，不必在代码里维护"版本 → 哈希"静态表。
@@ -1928,12 +1940,15 @@ cert_fingerprint() {
 svc_unit_path() { printf '%s/%s.service' "$OC_UNIT_DIR" "$1"; }
 
 # svc_create <unit> <ExecStart> <Description> [额外 Service 行...]
+# 每个额外参数独占一行。曾经用 extra="$*" 拼成一行，传多个参数时
+# 全部挤进同一个指令里（如 Environment=... CapabilityBoundingSet=...），
+# systemd 报 "Invalid environment assignment" 并整行忽略，沙箱静默失效。
 svc_create() {
     local unit="$1" exec="$2" desc="$3"; shift 3
-    local path extra
+    local path line
     path="$(svc_unit_path "$unit")"
-    extra="$*"
-    cat > "$path" <<EOF
+    {
+        cat <<EOF
 [Unit]
 Description=$desc
 After=network-online.target
@@ -1946,12 +1961,23 @@ ExecStart=$exec
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=32767
-${extra}
+EOF
+        for line in "$@"; do
+            printf '%s\n' "$line"
+        done
+        cat <<EOF
 
 [Install]
 WantedBy=multi-user.target
 EOF
+    } > "$path"
     chmod 644 "$path"
+    # SELinux：enforcing 的 RHEL 上，新写的 unit 若上下文不对会拒绝加载。
+    # 官方 get.hy2.sh 用 chcon 显式设上下文；restorecon 是更通用的等价做法，
+    # 没有 SELinux 的系统上该命令不存在，直接跳过。
+    if command -v restorecon >/dev/null 2>&1; then
+        restorecon "$path" 2>/dev/null || true
+    fi
     os_service_reload
 }
 
@@ -2467,9 +2493,13 @@ oc_upgrade_rollback() {
     return 1
 }
 
-# oc_upgrade_restart <unit>：重启并确认存活
-oc_upgrade_restart() {
-    local unit="$1"
+# oc_upgrade_service_restart <unit> <was_active>
+# 只在升级前处于运行状态的服务才重启（get.hy2.sh 的 restart_running_services
+# 同款语义）：用户手动停掉的服务，升级不该把它拉起来——新二进制在下次
+# 手动启动时自然生效。was_active=1 时重启并确认存活，0 时什么都不做。
+oc_upgrade_service_restart() {
+    local unit="$1" was_active="${2:-1}"
+    [[ "$was_active" == "1" ]] || return 0
     svc_restart "$unit"
     sleep 2
     svc_is_active "$unit"
@@ -2881,6 +2911,8 @@ proto_vless_reality_upgrade() {
     bin="$OC_BIN_DIR/xray"
     cfg="$(oc_proto_dir "$key")/config.json"
     unit="$(oc_unit_name "$key")"
+    local was_active=0
+    svc_is_active "$unit" && was_active=1
     asset="$(ocp_vless_reality_asset)" || { oc_err "当前架构 ${OC_ARCH} 无 Xray 预编译包"; return 1; }
 
     cur="$(oc_bin_version "$bin" || true)"
@@ -2918,16 +2950,16 @@ proto_vless_reality_upgrade() {
     if ! "$bin" run -test -c "$cfg" >/dev/null 2>&1; then
         oc_err "新版本 xray 无法通过现有配置自检，正在回滚："
         "$bin" run -test -c "$cfg" 2>&1 | tail -n 10 >&2
-        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_upgrade_rollback "$bak" "$bin" && oc_upgrade_service_restart "$unit" "$was_active"
         oc_err "已回滚到 ${cur:-旧版本}"
         return 1
     fi
 
     # 关卡二：重启后是否存活
-    if ! oc_upgrade_restart "$unit"; then
+    if ! oc_upgrade_service_restart "$unit" "$was_active"; then
         oc_err "新版本 xray 启动失败，正在回滚："
         svc_logs "$unit" 20 >&2
-        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_upgrade_rollback "$bak" "$bin" && oc_upgrade_service_restart "$unit" "$was_active"
         oc_err "已回滚到 ${cur:-旧版本}"
         return 1
     fi
@@ -3227,6 +3259,10 @@ ocp_hy2_fetch_bin() {
     asset="hysteria-linux-${arch}"
     tag="$(dl_latest_tag apernet/hysteria)"
     if [[ -z "$tag" ]]; then
+        # GitHub API 限流时退官方 update API（get.hy2.sh 同款，无限流）
+        tag="$(dl_hy2_latest_tag)"
+    fi
+    if [[ -z "$tag" ]]; then
         oc_warn "直接从 GitHub 获取最新版失败（网络或 API 受限）"
         tag="$(oc_ask "请手动输入 Hysteria 版本标签（例如 app/v2.13.0）" "app/v2.13.0")"
         [[ -n "$tag" ]] || return 1
@@ -3290,9 +3326,16 @@ EOF
 }
 
 ocp_hy2_write_unit() {
+    # 沙箱参数与官方 get.hy2.sh 生成的 unit 一致：hysteria 需要三个能力
+    # （NET_ADMIN 管端口跳跃的 nft 转发、NET_BIND_SERVICE 绑低端口、NET_RAW），
+    # NoNewPrivileges 禁止提权。其余内核没有官方参照，先不动。
     svc_create "$(oc_unit_name hysteria2)" \
         "${OC_BIN_DIR}/hysteria server -c $(ocp_hy2_cfg)" \
-        "OneClick Hysteria2"
+        "OneClick Hysteria2" \
+        "Environment=HYSTERIA_LOG_LEVEL=info" \
+        "CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW" \
+        "AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW" \
+        "NoNewPrivileges=true"
 }
 
 # 清理 hysteria 端口跳跃留下的 nft 表（table ip/ip6 hysteria_<hash>）。
@@ -3579,10 +3622,15 @@ proto_hysteria2_upgrade() {
     bin="${OC_BIN_DIR}/hysteria"
     cfg="$(ocp_hy2_cfg)"
     unit="$(oc_unit_name hysteria2)"
+    local was_active=0
+    svc_is_active "$unit" && was_active=1
     asset="hysteria-linux-$(ocp_hy2_arch)" || { oc_err "当前架构 ${OC_ARCH} 无 Hysteria2 构建"; return 1; }
 
     cur="$(oc_bin_version "$bin" || true)"
     tag="$(dl_latest_tag apernet/hysteria)"
+    if [[ -z "$tag" ]]; then
+        tag="$(dl_hy2_latest_tag)"
+    fi
     [[ -n "$tag" ]] || { oc_err "取不到 Hysteria 最新版本号（网络或 API 限流）"; return 1; }
     newver="${tag##*/}"; newver="${newver#v}"
     if [[ -n "$cur" && "$cur" == "$newver" ]]; then
@@ -3608,10 +3656,10 @@ proto_hysteria2_upgrade() {
     fi
     rm -rf "$tmp"
 
-    if ! oc_upgrade_restart "$unit"; then
+    if ! oc_upgrade_service_restart "$unit" "$was_active"; then
         oc_err "新版本 hysteria 启动失败（配置可能不兼容），正在回滚："
         svc_logs "$unit" 20 >&2
-        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_upgrade_rollback "$bak" "$bin" && oc_upgrade_service_restart "$unit" "$was_active"
         oc_err "已回滚到 ${cur:-旧版本}"
         return 1
     fi
@@ -4350,6 +4398,8 @@ proto_snell_upgrade() {
     bin="$(ocp_snell_bin)"
     cfg="$(ocp_snell_cfg)"
     unit="$(ocp_snell_unit)"
+    local was_active=0
+    svc_is_active "$unit" && was_active=1
     cur="$(oc_bin_version "$bin" || true)"
     prev_major="$(ocp_snell_db_major)"
 
@@ -4416,14 +4466,14 @@ proto_snell_upgrade() {
         return 1
     }
 
-    if ! oc_upgrade_restart "$unit"; then
+    if ! oc_upgrade_service_restart "$unit" "$was_active"; then
         oc_err "新版本 snell-server 启动失败，正在回滚："
         svc_logs "$unit" 20 >&2
         oc_upgrade_rollback "$bak" "$bin"
         # 配置也要回滚到旧版本格式
         ocp_snell_write_config "$port" "$psk" "$prev_major" \
             "$(db_get snell obfs "off")" "$(db_get snell obfs_host "")" >/dev/null 2>&1
-        svc_restart "$unit"
+        oc_upgrade_service_restart "$unit" "$was_active"
         oc_err "已回滚到 ${cur:-旧版本}"
         return 1
     fi
@@ -5428,7 +5478,10 @@ proto_ss_rust_upgrade() {
     cfg="$(ocp_ssrust_cfg)"
     stcfg="$(ocp_ssrust_stls_cfg)"
     unit="$(ocp_ssrust_unit)"
+    local was_active=0
+    svc_is_active "$unit" && was_active=1
     stl_unit="$(ocp_ssrust_stls_unit)"
+    local stl_was_active=0
     shadowtls="$(db_get ss_rust shadowtls "no")"
     tar_arch="$(ocp_ssrust_arch)" || { oc_err "当前架构 ${OC_ARCH} 无 SS-Rust 构建"; return 1; }
 
@@ -5461,10 +5514,10 @@ proto_ss_rust_upgrade() {
             rm -rf "$tmp"; oc_upgrade_rollback "$bak" "$bin"; return 1
         fi
         rm -rf "$tmp"
-        if ! oc_upgrade_restart "$unit"; then
+        if ! oc_upgrade_service_restart "$unit" "$was_active"; then
             oc_err "新版本 ssserver 启动失败，正在回滚："
             svc_logs "$unit" 20 >&2
-            oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+            oc_upgrade_rollback "$bak" "$bin" && oc_upgrade_service_restart "$unit" "$was_active"
             oc_err "已回滚到 ${cur:-旧版本}"
             return 1
         fi
@@ -5476,6 +5529,7 @@ proto_ss_rust_upgrade() {
 
     # ---- 2. shadow-tls（仅启用时）----
     if [[ "$shadowtls" == "yes" && -x "$stbin" ]]; then
+        svc_is_active "$stl_unit" && stl_was_active=1
         local stcur sttag stnew stasset sttmp stbak stnow
         stcur="$(oc_bin_version "$stbin" || true)"
         sttag="$(dl_latest_tag ihciah/shadow-tls)"
@@ -5501,10 +5555,10 @@ proto_ss_rust_upgrade() {
                     rm -rf "$sttmp"; oc_upgrade_rollback "$stbak" "$stbin"; return 1
                 fi
                 rm -rf "$sttmp"
-                if ! oc_upgrade_restart "$stl_unit"; then
+                if ! oc_upgrade_service_restart "$stl_unit" "$stl_was_active"; then
                     oc_err "新版本 shadow-tls 启动失败，正在回滚："
                     svc_logs "$stl_unit" 20 >&2
-                    oc_upgrade_rollback "$stbak" "$stbin" && svc_restart "$stl_unit"
+                    oc_upgrade_rollback "$stbak" "$stbin" && oc_upgrade_service_restart "$stl_unit" "$stl_was_active"
                     oc_err "已回滚到 ${stcur:-旧版本}"
                     return 1
                 fi
@@ -6234,6 +6288,8 @@ proto_anytls_upgrade() {
     bin="$(ocp_anytls_bin)"
     cfg="$(ocp_anytls_cfg)"
     unit="$(oc_unit_name anytls)"
+    local was_active=0
+    svc_is_active "$unit" && was_active=1
     case "${OC_ARCH:-}" in
         amd64|arm64|armv7l) ;;
         *) oc_err "当前架构 ${OC_ARCH} 无 sing-box 构建"; return 1 ;;
@@ -6280,16 +6336,16 @@ proto_anytls_upgrade() {
     if ! "$bin" check -c "$cfg" >/dev/null 2>&1; then
         oc_err "新版本 sing-box 无法通过现有配置校验，正在回滚："
         "$bin" check -c "$cfg" 2>&1 | tail -n 10 >&2
-        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_upgrade_rollback "$bak" "$bin" && oc_upgrade_service_restart "$unit" "$was_active"
         oc_err "已回滚到 ${cur:-旧版本}"
         return 1
     fi
 
     # 关卡二：重启后存活
-    if ! oc_upgrade_restart "$unit"; then
+    if ! oc_upgrade_service_restart "$unit" "$was_active"; then
         oc_err "新版本 sing-box 启动失败，正在回滚："
         svc_logs "$unit" 20 >&2
-        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_upgrade_rollback "$bak" "$bin" && oc_upgrade_service_restart "$unit" "$was_active"
         oc_err "已回滚到 ${cur:-旧版本}"
         return 1
     fi

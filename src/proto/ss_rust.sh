@@ -781,7 +781,10 @@ proto_ss_rust_upgrade() {
     cfg="$(ocp_ssrust_cfg)"
     stcfg="$(ocp_ssrust_stls_cfg)"
     unit="$(ocp_ssrust_unit)"
+    local was_active=0
+    svc_is_active "$unit" && was_active=1
     stl_unit="$(ocp_ssrust_stls_unit)"
+    local stl_was_active=0
     shadowtls="$(db_get ss_rust shadowtls "no")"
     tar_arch="$(ocp_ssrust_arch)" || { oc_err "当前架构 ${OC_ARCH} 无 SS-Rust 构建"; return 1; }
 
@@ -814,10 +817,10 @@ proto_ss_rust_upgrade() {
             rm -rf "$tmp"; oc_upgrade_rollback "$bak" "$bin"; return 1
         fi
         rm -rf "$tmp"
-        if ! oc_upgrade_restart "$unit"; then
+        if ! oc_upgrade_service_restart "$unit" "$was_active"; then
             oc_err "新版本 ssserver 启动失败，正在回滚："
             svc_logs "$unit" 20 >&2
-            oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+            oc_upgrade_rollback "$bak" "$bin" && oc_upgrade_service_restart "$unit" "$was_active"
             oc_err "已回滚到 ${cur:-旧版本}"
             return 1
         fi
@@ -829,6 +832,7 @@ proto_ss_rust_upgrade() {
 
     # ---- 2. shadow-tls（仅启用时）----
     if [[ "$shadowtls" == "yes" && -x "$stbin" ]]; then
+        svc_is_active "$stl_unit" && stl_was_active=1
         local stcur sttag stnew stasset sttmp stbak stnow
         stcur="$(oc_bin_version "$stbin" || true)"
         sttag="$(dl_latest_tag ihciah/shadow-tls)"
@@ -854,10 +858,10 @@ proto_ss_rust_upgrade() {
                     rm -rf "$sttmp"; oc_upgrade_rollback "$stbak" "$stbin"; return 1
                 fi
                 rm -rf "$sttmp"
-                if ! oc_upgrade_restart "$stl_unit"; then
+                if ! oc_upgrade_service_restart "$stl_unit" "$stl_was_active"; then
                     oc_err "新版本 shadow-tls 启动失败，正在回滚："
                     svc_logs "$stl_unit" 20 >&2
-                    oc_upgrade_rollback "$stbak" "$stbin" && svc_restart "$stl_unit"
+                    oc_upgrade_rollback "$stbak" "$stbin" && oc_upgrade_service_restart "$stl_unit" "$stl_was_active"
                     oc_err "已回滚到 ${stcur:-旧版本}"
                     return 1
                 fi

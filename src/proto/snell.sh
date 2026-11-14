@@ -533,6 +533,8 @@ proto_snell_upgrade() {
     bin="$(ocp_snell_bin)"
     cfg="$(ocp_snell_cfg)"
     unit="$(ocp_snell_unit)"
+    local was_active=0
+    svc_is_active "$unit" && was_active=1
     cur="$(oc_bin_version "$bin" || true)"
     prev_major="$(ocp_snell_db_major)"
 
@@ -599,14 +601,14 @@ proto_snell_upgrade() {
         return 1
     }
 
-    if ! oc_upgrade_restart "$unit"; then
+    if ! oc_upgrade_service_restart "$unit" "$was_active"; then
         oc_err "新版本 snell-server 启动失败，正在回滚："
         svc_logs "$unit" 20 >&2
         oc_upgrade_rollback "$bak" "$bin"
         # 配置也要回滚到旧版本格式
         ocp_snell_write_config "$port" "$psk" "$prev_major" \
             "$(db_get snell obfs "off")" "$(db_get snell obfs_host "")" >/dev/null 2>&1
-        svc_restart "$unit"
+        oc_upgrade_service_restart "$unit" "$was_active"
         oc_err "已回滚到 ${cur:-旧版本}"
         return 1
     fi

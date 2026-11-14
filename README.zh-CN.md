@@ -93,12 +93,15 @@ ACME 需要一个**你自己拥有、且已解析到本机**的域名——没�
 
 **内核原地安全升级。** `oneclick --upgrade <key|all>`（或菜单*节点管理 → 内核版本*）只替换内核二进制，
 不碰配置、端口和凭据。每次升级都会：备份旧二进制、按 GitHub release digest 校验下载、
-用新版本校验现有配置（内核提供 check 子命令时）、重启并确认服务存活。
+用新版本校验现有配置（内核提供 check 子命令时）、然后重启——**只重启升级前就在运行的服务**
+（你手动停掉的服务不会被升级拉起，新二进制在下次启动时生效）——并确认服务存活。
 任何一步失败都会还原备份并重启旧版本——备份保留到新版本确认跑起来为止，
 因为没有配置自检的内核（Hysteria2、ssserver）只能靠启动失败来发现不兼容。
 
 Snell 是例外：`dl.nssurge.com` 不提供版本索引，`--upgrade snell` 需要
-显式指定 `--kernel-version X.Y.Z`，无法自动查最新。
+显式指定 `--kernel-version X.Y.Z`，无法自动查最新。Hysteria2 在 GitHub API 限流时
+退回官方 `api.hy2.io` 更新接口；其 systemd unit 采用官方安装器同款沙箱
+（`NoNewPrivileges` + 受限能力集）——端口跳跃需要 `CAP_NET_ADMIN`。
 
 **Snell v5 与 v6。** 用 `--snell-version 5|6` 选择（或回答安装时的提问）。v6 是纯 TCP + `mode`；
 v5 是 **QUIC** 代理，需要 TCP 和 UDP 入站都放行，且是唯一提供 armv7l 构建的版本。

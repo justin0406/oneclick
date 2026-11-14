@@ -397,6 +397,8 @@ proto_vless_reality_upgrade() {
     bin="$OC_BIN_DIR/xray"
     cfg="$(oc_proto_dir "$key")/config.json"
     unit="$(oc_unit_name "$key")"
+    local was_active=0
+    svc_is_active "$unit" && was_active=1
     asset="$(ocp_vless_reality_asset)" || { oc_err "当前架构 ${OC_ARCH} 无 Xray 预编译包"; return 1; }
 
     cur="$(oc_bin_version "$bin" || true)"
@@ -434,16 +436,16 @@ proto_vless_reality_upgrade() {
     if ! "$bin" run -test -c "$cfg" >/dev/null 2>&1; then
         oc_err "新版本 xray 无法通过现有配置自检，正在回滚："
         "$bin" run -test -c "$cfg" 2>&1 | tail -n 10 >&2
-        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_upgrade_rollback "$bak" "$bin" && oc_upgrade_service_restart "$unit" "$was_active"
         oc_err "已回滚到 ${cur:-旧版本}"
         return 1
     fi
 
     # 关卡二：重启后是否存活
-    if ! oc_upgrade_restart "$unit"; then
+    if ! oc_upgrade_service_restart "$unit" "$was_active"; then
         oc_err "新版本 xray 启动失败，正在回滚："
         svc_logs "$unit" 20 >&2
-        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_upgrade_rollback "$bak" "$bin" && oc_upgrade_service_restart "$unit" "$was_active"
         oc_err "已回滚到 ${cur:-旧版本}"
         return 1
     fi

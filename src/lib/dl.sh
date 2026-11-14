@@ -31,7 +31,8 @@ dl_fetch() {
     tmp="${out}.part.$$"
     for src in "${urls[@]}"; do
         for attempt in 1 2 3; do
-            if curl -fL --connect-timeout 10 --max-time 900 --retry 1 -o "$tmp" "$src" >/dev/null 2>&1; then
+            # no-cache：get.hy2.sh 同款，防止镜像/CDN 缓存返回旧版本二进制
+            if curl -fL -H 'Cache-Control: no-cache' --connect-timeout 10 --max-time 900 --retry 1 -o "$tmp" "$src" >/dev/null 2>&1; then
                 ok=1; break 2
             fi
             rm -f "$tmp"; sleep 1
@@ -76,7 +77,18 @@ dl_latest_ver() {
     printf '%s' "${t#v}"
 }
 
-# dl_asset_digest <owner/repo> <tag> <asset-name> -> 输出该资产的 sha256（小写十六进制）
+# dl_hy2_latest_tag -> hysteria 官方 update API 的最新 tag（app/vX.Y.Z）
+# GitHub API 有匿名限流（60 次/小时），官方 api.hy2.io 没有限流且离 GitHub
+# 更近——get.hy2.sh 就是用它查版本的。作为 dl_latest_tag 失败时的备用源。
+dl_hy2_latest_tag() {
+    local out
+    out="$(curl -fsS --connect-timeout 10 --max-time 30 \
+        "https://api.hy2.io/v1/update?cver=installscript&plat=linux&arch=${OC_ARCH:-amd64}&chan=release&side=server" 2>/dev/null \
+        | jq -r '.lver // empty' 2>/dev/null)"
+    printf '%s' "$out"
+}
+
+# dl_asset_digest <owner/repo> <tag> <asset-name># dl_asset_digest <owner/repo> <tag> <asset-name> -> 输出该资产的 sha256（小写十六进制）
 #
 # GitHub 的 release API 为每个资产提供 digest 字段（形如 "sha256:<hex>"），
 # 这样任意版本都能动态取到官方哈希，不必在代码里维护"版本 → 哈希"静态表。

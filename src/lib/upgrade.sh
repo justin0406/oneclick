@@ -84,9 +84,13 @@ oc_upgrade_rollback() {
     return 1
 }
 
-# oc_upgrade_restart <unit>：重启并确认存活
-oc_upgrade_restart() {
-    local unit="$1"
+# oc_upgrade_service_restart <unit> <was_active>
+# 只在升级前处于运行状态的服务才重启（get.hy2.sh 的 restart_running_services
+# 同款语义）：用户手动停掉的服务，升级不该把它拉起来——新二进制在下次
+# 手动启动时自然生效。was_active=1 时重启并确认存活，0 时什么都不做。
+oc_upgrade_service_restart() {
+    local unit="$1" was_active="${2:-1}"
+    [[ "$was_active" == "1" ]] || return 0
     svc_restart "$unit"
     sleep 2
     svc_is_active "$unit"

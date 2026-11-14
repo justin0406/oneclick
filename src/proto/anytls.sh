@@ -393,6 +393,8 @@ proto_anytls_upgrade() {
     bin="$(ocp_anytls_bin)"
     cfg="$(ocp_anytls_cfg)"
     unit="$(oc_unit_name anytls)"
+    local was_active=0
+    svc_is_active "$unit" && was_active=1
     case "${OC_ARCH:-}" in
         amd64|arm64|armv7l) ;;
         *) oc_err "当前架构 ${OC_ARCH} 无 sing-box 构建"; return 1 ;;
@@ -439,16 +441,16 @@ proto_anytls_upgrade() {
     if ! "$bin" check -c "$cfg" >/dev/null 2>&1; then
         oc_err "新版本 sing-box 无法通过现有配置校验，正在回滚："
         "$bin" check -c "$cfg" 2>&1 | tail -n 10 >&2
-        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_upgrade_rollback "$bak" "$bin" && oc_upgrade_service_restart "$unit" "$was_active"
         oc_err "已回滚到 ${cur:-旧版本}"
         return 1
     fi
 
     # 关卡二：重启后存活
-    if ! oc_upgrade_restart "$unit"; then
+    if ! oc_upgrade_service_restart "$unit" "$was_active"; then
         oc_err "新版本 sing-box 启动失败，正在回滚："
         svc_logs "$unit" 20 >&2
-        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_upgrade_rollback "$bak" "$bin" && oc_upgrade_service_restart "$unit" "$was_active"
         oc_err "已回滚到 ${cur:-旧版本}"
         return 1
     fi

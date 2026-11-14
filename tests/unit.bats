@@ -843,3 +843,49 @@ EOS
     [ "$status" -ne 0 ] || { echo "空域名应被拒"; return 1; }
     [[ "$output" == *"--domain"* ]] || { echo "未提示用 --domain：$output"; return 1; }
 }
+
+# ---------- 借鉴 get.hy2.sh 的改进 ----------
+
+@test "upgrade_restart_skips_inactive_services" {
+    # 官方 restart_running_services 语义：只重启原本运行中的服务，
+    # 用户手动停掉的服务升级后不该被拉起
+    [ "$(oc_upgrade_service_restart dummy.service 0)" = "" ] || { echo "inactive 应 no-op"; return 1; }
+    # was_active=1 时走 restart 路径：重启成功才返回 0（stub 掉 systemd，
+    # macOS 上没有 systemctl，直接测会撞 127）
+    svc_restart() { return 0; }
+    svc_is_active() { return 0; }
+    run oc_upgrade_service_restart "fake-unit" 1
+    [ "$status" -eq 0 ] || { echo "重启成功应返回 0"; return 1; }
+    svc_is_active() { return 1; }
+    run oc_upgrade_service_restart "fake-unit" 1
+    [ "$status" -ne 0 ] || { echo "重启后未存活应返回非零"; return 1; }
+}
+
+@test "hy2_unit_has_official_sandbox_directives" {
+    # 沙箱参数与官方 get.hy2.sh 的 unit 模板一致
+    local body
+    body="$(declare -f ocp_hy2_write_unit)"
+    [[ "$body" == *"NoNewPrivileges=true"* ]] || { echo "缺 NoNewPrivileges"; return 1; }
+    [[ "$body" == *"CAP_NET_ADMIN"* ]] || { echo "缺 NET_ADMIN（端口跳跃需要）"; return 1; }
+    [[ "$body" == *"AmbientCapabilities"* ]] || { echo "缺 AmbientCapabilities"; return 1; }
+}
+
+@test "hy2_version_falls_back_to_official_api" {
+    # GitHub API 限流时退 api.hy2.io（官方 update API，无限流）
+    local body; body="$(declare -f dl_hy2_latest_tag)"
+    [[ "$body" == *"api.hy2.io/v1/update"* ]] || { echo "缺官方 API"; return 1; }
+    local up; up="$(declare -f ocp_hy2_fetch_bin)"
+    [[ "$up" == *"dl_hy2_latest_tag"* ]] || { echo "安装路径未接入 fallback"; return 1; }
+    local ug; ug="$(declare -f proto_hysteria2_upgrade)"
+    [[ "$ug" == *"dl_hy2_latest_tag"* ]] || { echo "升级路径未接入 fallback"; return 1; }
+}
+
+@test "dl_fetch_sends_no_cache_header" {
+    local body; body="$(declare -f dl_fetch)"
+    [[ "$body" == *"Cache-Control: no-cache"* ]] || { echo "下载未带 no-cache"; return 1; }
+}
+
+@test "svc_create_runs_restorecon_when_available" {
+    local body; body="$(declare -f svc_create)"
+    [[ "$body" == *"restorecon"* ]] || { echo "缺 SELinux 上下文恢复"; return 1; }
+}

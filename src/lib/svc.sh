@@ -4,12 +4,15 @@
 svc_unit_path() { printf '%s/%s.service' "$OC_UNIT_DIR" "$1"; }
 
 # svc_create <unit> <ExecStart> <Description> [额外 Service 行...]
+# 每个额外参数独占一行。曾经用 extra="$*" 拼成一行，传多个参数时
+# 全部挤进同一个指令里（如 Environment=... CapabilityBoundingSet=...），
+# systemd 报 "Invalid environment assignment" 并整行忽略，沙箱静默失效。
 svc_create() {
     local unit="$1" exec="$2" desc="$3"; shift 3
-    local path extra
+    local path line
     path="$(svc_unit_path "$unit")"
-    extra="$*"
-    cat > "$path" <<EOF
+    {
+        cat <<EOF
 [Unit]
 Description=$desc
 After=network-online.target
@@ -22,12 +25,23 @@ ExecStart=$exec
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=32767
-${extra}
+EOF
+        for line in "$@"; do
+            printf '%s\n' "$line"
+        done
+        cat <<EOF
 
 [Install]
 WantedBy=multi-user.target
 EOF
+    } > "$path"
     chmod 644 "$path"
+    # SELinux：enforcing 的 RHEL 上，新写的 unit 若上下文不对会拒绝加载。
+    # 官方 get.hy2.sh 用 chcon 显式设上下文；restorecon 是更通用的等价做法，
+    # 没有 SELinux 的系统上该命令不存在，直接跳过。
+    if command -v restorecon >/dev/null 2>&1; then
+        restorecon "$path" 2>/dev/null || true
+    fi
     os_service_reload
 }
 

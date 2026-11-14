@@ -112,13 +112,17 @@ prompt, or use `oneclick --purge` to remove everything it ever created — that 
 **Kernels upgrade in place, safely.** `oneclick --upgrade <key|all>` (or *Node management → kernel
 versions*) replaces a kernel binary without touching your config, port or credentials. Every upgrade
 backs up the old binary, verifies the download against the GitHub release digest, checks that the new
-version still accepts your existing config (where the kernel offers a check subcommand), then restarts
-and confirms the service is alive. Any failure restores the backup and restarts the old version — the
-backup is kept until the new one is proven running, because for kernels without a config check
-(Hysteria2, ssserver) a failed start is the only signal that something broke.
+version still accepts your existing config (where the kernel offers a check subcommand), then
+restarts — **only if the service was running before the upgrade** (a service you stopped on purpose
+stays stopped) — and confirms it is alive. Any failure restores the backup and restarts the old
+version — the backup is kept until the new one is proven running, because for kernels without a
+config check (Hysteria2, ssserver) a failed start is the only signal that something broke.
 
 Snell is the exception: `dl.nssurge.com` publishes no version index, so `--upgrade snell` needs an
-explicit `--kernel-version X.Y.Z` instead of discovering the latest.
+explicit `--kernel-version X.Y.Z` instead of discovering the latest. Hysteria2 falls back to the
+official `api.hy2.io` update API when the GitHub API is rate-limited. The Hysteria2 systemd unit
+carries the same sandbox as the official installer (`NoNewPrivileges`, bounded capabilities) — it
+needs `CAP_NET_ADMIN` for port hopping.
 
 **Snell v5 vs v6.** Pick with `--snell-version 5|6` (or answer the prompt). v6 is plain TCP with
 `mode`; v5 is a **QUIC** proxy that needs both TCP and UDP inbound open, and is the only version with

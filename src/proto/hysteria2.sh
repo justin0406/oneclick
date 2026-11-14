@@ -68,6 +68,10 @@ ocp_hy2_fetch_bin() {
     asset="hysteria-linux-${arch}"
     tag="$(dl_latest_tag apernet/hysteria)"
     if [[ -z "$tag" ]]; then
+        # GitHub API 限流时退官方 update API（get.hy2.sh 同款，无限流）
+        tag="$(dl_hy2_latest_tag)"
+    fi
+    if [[ -z "$tag" ]]; then
         oc_warn "直接从 GitHub 获取最新版失败（网络或 API 受限）"
         tag="$(oc_ask "请手动输入 Hysteria 版本标签（例如 app/v2.13.0）" "app/v2.13.0")"
         [[ -n "$tag" ]] || return 1
@@ -131,9 +135,16 @@ EOF
 }
 
 ocp_hy2_write_unit() {
+    # 沙箱参数与官方 get.hy2.sh 生成的 unit 一致：hysteria 需要三个能力
+    # （NET_ADMIN 管端口跳跃的 nft 转发、NET_BIND_SERVICE 绑低端口、NET_RAW），
+    # NoNewPrivileges 禁止提权。其余内核没有官方参照，先不动。
     svc_create "$(oc_unit_name hysteria2)" \
         "${OC_BIN_DIR}/hysteria server -c $(ocp_hy2_cfg)" \
-        "OneClick Hysteria2"
+        "OneClick Hysteria2" \
+        "Environment=HYSTERIA_LOG_LEVEL=info" \
+        "CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW" \
+        "AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW" \
+        "NoNewPrivileges=true"
 }
 
 # 清理 hysteria 端口跳跃留下的 nft 表（table ip/ip6 hysteria_<hash>）。
@@ -420,10 +431,15 @@ proto_hysteria2_upgrade() {
     bin="${OC_BIN_DIR}/hysteria"
     cfg="$(ocp_hy2_cfg)"
     unit="$(oc_unit_name hysteria2)"
+    local was_active=0
+    svc_is_active "$unit" && was_active=1
     asset="hysteria-linux-$(ocp_hy2_arch)" || { oc_err "当前架构 ${OC_ARCH} 无 Hysteria2 构建"; return 1; }
 
     cur="$(oc_bin_version "$bin" || true)"
     tag="$(dl_latest_tag apernet/hysteria)"
+    if [[ -z "$tag" ]]; then
+        tag="$(dl_hy2_latest_tag)"
+    fi
     [[ -n "$tag" ]] || { oc_err "取不到 Hysteria 最新版本号（网络或 API 限流）"; return 1; }
     newver="${tag##*/}"; newver="${newver#v}"
     if [[ -n "$cur" && "$cur" == "$newver" ]]; then
@@ -449,10 +465,10 @@ proto_hysteria2_upgrade() {
     fi
     rm -rf "$tmp"
 
-    if ! oc_upgrade_restart "$unit"; then
+    if ! oc_upgrade_service_restart "$unit" "$was_active"; then
         oc_err "新版本 hysteria 启动失败（配置可能不兼容），正在回滚："
         svc_logs "$unit" 20 >&2
-        oc_upgrade_rollback "$bak" "$bin" && svc_restart "$unit"
+        oc_upgrade_rollback "$bak" "$bin" && oc_upgrade_service_restart "$unit" "$was_active"
         oc_err "已回滚到 ${cur:-旧版本}"
         return 1
     fi
