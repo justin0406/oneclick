@@ -10,7 +10,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # 需要完整历史：README 同步检查要对比 PR base 与 push 之前的提交
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install shellcheck
         run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
@@ -34,6 +37,26 @@ jobs:
 
       - name: Unit tests
         run: bats tests/
+
+      # 中英文 README 必须一起改：改了英文没改中文的提交直接拒绝。
+      # 这个遗漏已经发生过多次（v0.5.0 到 v0.9.0 的功能一个都没同步进中文版），
+      # 不能再靠人记，交给 CI。
+      - name: Check README zh-CN is kept in sync
+        run: |
+          if [[ "${{ github.event_name }}" = "pull_request" ]]; then
+            FILES="$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")"
+          else
+            BASE="${{ github.event.before }}"
+            [[ -z "$BASE" || "$BASE" = "0000000000000000000000000000000000000000" ]] && BASE="HEAD^"
+            FILES="$(git diff --name-only "$BASE..HEAD")"
+          fi
+          echo "变更文件："
+          echo "$FILES" | sed 's/^/  /'
+          if grep -qx 'README\.md' <<< "$FILES" && ! grep -qx 'README\.zh-CN\.md' <<< "$FILES"; then
+            echo "::error::README.md 有改动但 README.zh-CN.md 没同步——中英文必须一起更新"
+            exit 1
+          fi
+          echo "✓ README 中英文同步检查通过"
 
       - name: Smoke test
         run: |
