@@ -889,3 +889,33 @@ EOS
     local body; body="$(declare -f svc_create)"
     [[ "$body" == *"restorecon"* ]] || { echo "缺 SELinux 上下文恢复"; return 1; }
 }
+
+# ---------- IPv6 方括号规则：只有 URI 需要，独立字段一律裸地址 ----------
+# Surge/Loon/Clash/sing-box 的服务器地址是逗号分隔的独立字段，带 [] 是 URI 语法误用。
+
+@test "ipv6_brackets_only_in_uri_never_in_field_syntax" {
+    # settings 里不填 ip：让探测走 stub，拿到 IPv6
+    write_db '{"installed":["ss_rust","hysteria2","anytls","snell"],"settings":{},
+      "ss_rust":{"port":"8388","method":"2022-blake3-aes-128-gcm","password":"AAAAAAAAAAAAAAAAAAAAAA==","shadowtls":"no"},
+      "hysteria2":{"port":"9000","password":"pw","sni":"b.com","tls_mode":"self","obfs":"off"},
+      "anytls":{"port":"9001","password":"pw","sni":"b.com","tls_mode":"self"},
+      "snell":{"port":"9002","psk":"testpsk1234567890","version":"6.0.0","major":"6"}}'
+    net_primary_ip() { printf '2a0e:97c0:3f7:1::56'; }
+    net_ipv6() { printf '2a0e:97c0:3f7:1::56'; }
+    local k fmt out
+    for k in ss_rust hysteria2 anytls snell; do
+        for fmt in clash surge loon singbox; do
+            oc_call() { "proto_${1}_${2}"; }
+            out="$("proto_${k}_${fmt}" 2>/dev/null)" || continue
+            [[ -n "$out" ]] || continue
+            if grep -q '\[2a0e' <<< "$out"; then
+                echo "$k/$fmt 的独立字段带了方括号：$(grep -m1 '\[2a0e' <<< "$out")"
+                return 1
+            fi
+        done
+        # URI 必须带方括号
+        if out="$("proto_${k}_link" 2>/dev/null)" && [[ -n "$out" ]]; then
+            [[ "$out" == *"[2a0e"* ]] || { echo "$k/link 的 URI 缺方括号"; return 1; }
+        fi
+    done
+}

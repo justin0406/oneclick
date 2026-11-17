@@ -1104,7 +1104,8 @@ proto_ss_rust_surge() {
     port="$(db_get ss_rust port "")"
     method="$(db_get ss_rust method "$OC_SSRUST_METHOD")"
     password="$(db_get ss_rust password "")"
-    host="$(ocp_ssrust_host)" || {
+    host="$(ocp_ssrust_ip)"
+    [[ -n "$host" ]] || {
         oc_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
         return 1
     }
@@ -1135,7 +1136,8 @@ proto_ss_rust_singbox() {
     port="$(db_get ss_rust port "")"
     method="$(db_get ss_rust method "$OC_SSRUST_METHOD")"
     password="$(db_get ss_rust password "")"
-    host="$(ocp_ssrust_host)" || {
+    host="$(ocp_ssrust_ip)"
+    [[ -n "$host" ]] || {
         oc_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
         return 1
     }
@@ -1174,7 +1176,8 @@ proto_ss_rust_loon() {
     port="$(db_get ss_rust port "")"
     method="$(db_get ss_rust method "$OC_SSRUST_METHOD")"
     password="$(db_get ss_rust password "")"
-    host="$(ocp_ssrust_host)" || {
+    host="$(ocp_ssrust_ip)"
+    [[ -n "$host" ]] || {
         oc_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
         return 1
     }

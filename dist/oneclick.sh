@@ -17,7 +17,7 @@ if (( BASH_VERSINFO[0] < 4 )); then
     exit 1
 fi
 
-OC_VERSION="0.9.1"
+OC_VERSION="0.9.2"
 OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
@@ -3004,12 +3004,11 @@ proto_vless_reality_link() {
         oc_err "状态库缺少 uuid / short_id / public_key，请重新安装"
         return 1
     fi
-    ip="$(ocp_vless_reality_ip)"
-    [[ -z "$ip" ]] && {
+    # URI 是 host:port 连写，IPv6 必须加方括号
+    ip="$(ocp_vless_reality_host)" || {
         oc_err "无法获取服务器公网 IP（可执行 oneclick --check-ip 后重试）"
         return 1
     }
-    [[ "$ip" == *:* ]] && ip="[$ip]"
     name="${OC_PROTO_TITLE[$key]:-VLESS-Reality}"
     printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp&flow=xtls-rprx-vision#%s\n' \
         "$uuid" "$ip" "$port" "$sni" "$pub" "$sid" "$name"
@@ -3112,7 +3111,8 @@ proto_vless_reality_surge() {
         oc_err "VLESS-Reality 未安装"
         return 1
     fi
-    ip="$(ocp_vless_reality_host)" || return 1
+    ip="$(ocp_vless_reality_ip)"
+    [[ -n "$ip" ]] || return 1
     port="$(db_get "$key" port "")"
     uuid="$(db_get "$key" uuid "")"
     sni="$(db_get "$key" server_name "www.microsoft.com")"
@@ -3791,7 +3791,8 @@ proto_hysteria2_surge() {
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get hysteria2 sni bing.com)"
     hop="$(db_get hysteria2 hop "")"
-    host="$(ocp_hy2_host)" || return 1
+    host="$(ocp_hy2_ip)"
+    [[ -n "$host" ]] || return 1
     line="$(ocp_hy2_name) = hysteria2, ${host}, ${port}, password=${pw}, sni=${sni}"
     # Surge 手册 policies/hysteria2.html：port-hopping 用分号分隔，设置后忽略主端口
     if [[ -n "$hop" ]]; then
@@ -3813,7 +3814,8 @@ proto_hysteria2_singbox() {
     obfs_pw="$(db_get hysteria2 obfs_password "")"
     hop="$(db_get hysteria2 hop "")"
     ins="$(ocp_hy2_insecure)"
-    host="$(ocp_hy2_host)" || return 1
+    host="$(ocp_hy2_ip)"
+    [[ -n "$host" ]] || return 1
     # tag 与 Clash/Surge/Loon 侧节点名保持一致，selector 里更好认
     name="$(ocp_hy2_name)"
     hop_ports=""
@@ -3852,7 +3854,8 @@ proto_hysteria2_loon() {
     hop="$(db_get hysteria2 hop "")"
     obfs="$(db_get hysteria2 obfs off)"
     obfs_pw="$(db_get hysteria2 obfs_password "")"
-    host="$(ocp_hy2_host)" || return 1
+    host="$(ocp_hy2_ip)"
+    [[ -n "$host" ]] || return 1
     line="$(oc_loon_name hysteria2) = Hysteria2,${host},${port},\"${pw}\""
     [[ -n "$hop" ]] && line+=",server-ports=\"${hop}\""
     line+=",sni=${sni}"
@@ -4630,7 +4633,8 @@ proto_snell_surge() {
     fi
     port="$(db_get snell port "")"
     psk="$(db_get snell psk "")"
-    host="$(ocp_snell_host)" || {
+    host="$(ocp_snell_ip)"
+    [[ -n "$host" ]] || {
         oc_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
         return 1
     }
@@ -4657,7 +4661,8 @@ proto_snell_singbox() {
     fi
     port="$(db_get snell port "")"
     psk="$(db_get snell psk "")"
-    host="$(ocp_snell_host)" || {
+    host="$(ocp_snell_ip)"
+    [[ -n "$host" ]] || {
         oc_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
         return 1
     }
@@ -5801,7 +5806,8 @@ proto_ss_rust_surge() {
     port="$(db_get ss_rust port "")"
     method="$(db_get ss_rust method "$OC_SSRUST_METHOD")"
     password="$(db_get ss_rust password "")"
-    host="$(ocp_ssrust_host)" || {
+    host="$(ocp_ssrust_ip)"
+    [[ -n "$host" ]] || {
         oc_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
         return 1
     }
@@ -5832,7 +5838,8 @@ proto_ss_rust_singbox() {
     port="$(db_get ss_rust port "")"
     method="$(db_get ss_rust method "$OC_SSRUST_METHOD")"
     password="$(db_get ss_rust password "")"
-    host="$(ocp_ssrust_host)" || {
+    host="$(ocp_ssrust_ip)"
+    [[ -n "$host" ]] || {
         oc_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
         return 1
     }
@@ -5871,7 +5878,8 @@ proto_ss_rust_loon() {
     port="$(db_get ss_rust port "")"
     method="$(db_get ss_rust method "$OC_SSRUST_METHOD")"
     password="$(db_get ss_rust password "")"
-    host="$(ocp_ssrust_host)" || {
+    host="$(ocp_ssrust_ip)"
+    [[ -n "$host" ]] || {
         oc_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
         return 1
     }
@@ -6452,7 +6460,8 @@ proto_anytls_surge() {
     port="$(db_get anytls port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
-    host="$(ocp_anytls_host)" || return 1
+    host="$(ocp_anytls_ip)"
+    [[ -n "$host" ]] || return 1
     line="$(ocp_anytls_name) = anytls, ${host}, ${port}, password=${pw}, sni=${sni}"
     if [[ "$(ocp_anytls_insecure)" == "1" ]]; then
         line+=", skip-cert-verify=true"
@@ -6467,7 +6476,8 @@ proto_anytls_singbox() {
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
     ins="$(ocp_anytls_insecure)"
-    host="$(ocp_anytls_host)" || return 1
+    host="$(ocp_anytls_ip)"
+    [[ -n "$host" ]] || return 1
     # tag 与 Clash/Surge/Loon 侧节点名保持一致
     name="$(ocp_anytls_name)"
 
@@ -6494,7 +6504,8 @@ proto_anytls_loon() {
     port="$(db_get anytls port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
-    host="$(ocp_anytls_host)" || return 1
+    host="$(ocp_anytls_ip)"
+    [[ -n "$host" ]] || return 1
     line="$(oc_loon_name anytls) = AnyTLS,${host},${port},\"${pw}\""
     line+=",sni=${sni}"
     [[ "$(ocp_anytls_insecure)" == "1" ]] && line+=",skip-cert-verify=true"

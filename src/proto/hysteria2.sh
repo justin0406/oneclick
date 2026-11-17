@@ -600,7 +600,8 @@ proto_hysteria2_surge() {
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get hysteria2 sni bing.com)"
     hop="$(db_get hysteria2 hop "")"
-    host="$(ocp_hy2_host)" || return 1
+    host="$(ocp_hy2_ip)"
+    [[ -n "$host" ]] || return 1
     line="$(ocp_hy2_name) = hysteria2, ${host}, ${port}, password=${pw}, sni=${sni}"
     # Surge 手册 policies/hysteria2.html：port-hopping 用分号分隔，设置后忽略主端口
     if [[ -n "$hop" ]]; then
@@ -622,7 +623,8 @@ proto_hysteria2_singbox() {
     obfs_pw="$(db_get hysteria2 obfs_password "")"
     hop="$(db_get hysteria2 hop "")"
     ins="$(ocp_hy2_insecure)"
-    host="$(ocp_hy2_host)" || return 1
+    host="$(ocp_hy2_ip)"
+    [[ -n "$host" ]] || return 1
     # tag 与 Clash/Surge/Loon 侧节点名保持一致，selector 里更好认
     name="$(ocp_hy2_name)"
     hop_ports=""
@@ -661,7 +663,8 @@ proto_hysteria2_loon() {
     hop="$(db_get hysteria2 hop "")"
     obfs="$(db_get hysteria2 obfs off)"
     obfs_pw="$(db_get hysteria2 obfs_password "")"
-    host="$(ocp_hy2_host)" || return 1
+    host="$(ocp_hy2_ip)"
+    [[ -n "$host" ]] || return 1
     line="$(oc_loon_name hysteria2) = Hysteria2,${host},${port},\"${pw}\""
     [[ -n "$hop" ]] && line+=",server-ports=\"${hop}\""
     line+=",sni=${sni}"

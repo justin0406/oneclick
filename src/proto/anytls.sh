@@ -557,7 +557,8 @@ proto_anytls_surge() {
     port="$(db_get anytls port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
-    host="$(ocp_anytls_host)" || return 1
+    host="$(ocp_anytls_ip)"
+    [[ -n "$host" ]] || return 1
     line="$(ocp_anytls_name) = anytls, ${host}, ${port}, password=${pw}, sni=${sni}"
     if [[ "$(ocp_anytls_insecure)" == "1" ]]; then
         line+=", skip-cert-verify=true"
@@ -572,7 +573,8 @@ proto_anytls_singbox() {
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
     ins="$(ocp_anytls_insecure)"
-    host="$(ocp_anytls_host)" || return 1
+    host="$(ocp_anytls_ip)"
+    [[ -n "$host" ]] || return 1
     # tag 与 Clash/Surge/Loon 侧节点名保持一致
     name="$(ocp_anytls_name)"
 
@@ -599,7 +601,8 @@ proto_anytls_loon() {
     port="$(db_get anytls port "")"
     [[ -n "$pw" && -n "$port" ]] || return 1
     sni="$(db_get anytls sni bing.com)"
-    host="$(ocp_anytls_host)" || return 1
+    host="$(ocp_anytls_ip)"
+    [[ -n "$host" ]] || return 1
     line="$(oc_loon_name anytls) = AnyTLS,${host},${port},\"${pw}\""
     line+=",sni=${sni}"
     [[ "$(ocp_anytls_insecure)" == "1" ]] && line+=",skip-cert-verify=true"

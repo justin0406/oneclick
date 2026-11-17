@@ -490,12 +490,11 @@ proto_vless_reality_link() {
         oc_err "状态库缺少 uuid / short_id / public_key，请重新安装"
         return 1
     fi
-    ip="$(ocp_vless_reality_ip)"
-    [[ -z "$ip" ]] && {
+    # URI 是 host:port 连写，IPv6 必须加方括号
+    ip="$(ocp_vless_reality_host)" || {
         oc_err "无法获取服务器公网 IP（可执行 oneclick --check-ip 后重试）"
         return 1
     }
-    [[ "$ip" == *:* ]] && ip="[$ip]"
     name="${OC_PROTO_TITLE[$key]:-VLESS-Reality}"
     printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp&flow=xtls-rprx-vision#%s\n' \
         "$uuid" "$ip" "$port" "$sni" "$pub" "$sid" "$name"
@@ -598,7 +597,8 @@ proto_vless_reality_surge() {
         oc_err "VLESS-Reality 未安装"
         return 1
     fi
-    ip="$(ocp_vless_reality_host)" || return 1
+    ip="$(ocp_vless_reality_ip)"
+    [[ -n "$ip" ]] || return 1
     port="$(db_get "$key" port "")"
     uuid="$(db_get "$key" uuid "")"
     sni="$(db_get "$key" server_name "www.microsoft.com")"

@@ -765,7 +765,8 @@ proto_snell_surge() {
     fi
     port="$(db_get snell port "")"
     psk="$(db_get snell psk "")"
-    host="$(ocp_snell_host)" || {
+    host="$(ocp_snell_ip)"
+    [[ -n "$host" ]] || {
         oc_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
         return 1
     }
@@ -792,7 +793,8 @@ proto_snell_singbox() {
     fi
     port="$(db_get snell port "")"
     psk="$(db_get snell psk "")"
-    host="$(ocp_snell_host)" || {
+    host="$(ocp_snell_ip)"
+    [[ -n "$host" ]] || {
         oc_err "取不到公网 IP，请检查网络或手动设置 settings.ip"
         return 1
     }
