@@ -773,8 +773,31 @@ EOS
     OC_CERT_DIR="$dir"
     OC_YES=1
     cert_ensure "shared.test.com" "" >/dev/null 2>&1 || { echo "复用失败"; return 1; }
-    [ "$CERT_MODE" = "existing" ] || { echo "应标记为复用：$CERT_MODE"; return 1; }
+    # 复用的是自签证书，必须仍标记 self：hy2/anytls 据此给客户端链接加 insecure=1。
+    # 误标 existing 会让客户端去校验一张自签证书，必然连接失败。
+    [ "$CERT_MODE" = "self" ] || { echo "复用的自签证书应标记为 self：$CERT_MODE"; return 1; }
     [ "$CERT_PATH" = "$dir/shared.test.com/cert.pem" ] || { echo "路径不对：$CERT_PATH"; return 1; }
+}
+
+@test "reused_selfsigned_cert_keeps_insecure_in_hy2_link" {
+    # 端到端回归：自签证书被复用后，hy2 链接仍带 insecure=1
+    local dir="${BATS_TEST_TMPDIR}/reuse-hy2"
+    mkdir -p "$dir"
+    cert_self "reuse.test.com" "$dir/reuse.test.com" >/dev/null 2>&1 || skip "openssl 不可用"
+    OC_CERT_DIR="$dir"
+    OC_YES=1
+    cert_ensure "reuse.test.com" "" >/dev/null 2>&1 || { echo "复用失败"; return 1; }
+    [ "$CERT_MODE" = "self" ] || { echo "复用模式应为 self：$CERT_MODE"; return 1; }
+    # 模拟安装落库
+    db_set hysteria2 tls_mode "$CERT_MODE"
+    db_set hysteria2 port "9000"
+    db_set hysteria2 password "pw123456789012"
+    db_set hysteria2 sni "reuse.test.com"
+    db_set hysteria2 obfs "off"
+    net_primary_ip() { printf '1.2.3.4'; }
+    run proto_hysteria2_link
+    [ "$status" -eq 0 ] || { echo "生成链接失败：$output"; return 1; }
+    [[ "$output" == *"insecure=1"* ]] || { echo "复用自签证书的链接缺 insecure=1：$output"; return 1; }
 }
 
 @test "acme_mode_does_not_reuse_selfsigned" {
@@ -862,12 +885,58 @@ EOS
 }
 
 @test "hy2_unit_has_official_sandbox_directives" {
-    # 沙箱参数与官方 get.hy2.sh 的 unit 模板一致
+    # hy2 专属能力由本函数给，通用加固项（NoNewPrivileges 等）由 svc_create 统一写入
     local body
     body="$(declare -f ocp_hy2_write_unit)"
-    [[ "$body" == *"NoNewPrivileges=true"* ]] || { echo "缺 NoNewPrivileges"; return 1; }
     [[ "$body" == *"CAP_NET_ADMIN"* ]] || { echo "缺 NET_ADMIN（端口跳跃需要）"; return 1; }
     [[ "$body" == *"AmbientCapabilities"* ]] || { echo "缺 AmbientCapabilities"; return 1; }
+    svc_body="$(declare -f svc_create)"
+    [[ "$svc_body" == *"NoNewPrivileges=true"* ]] || { echo "svc_create 缺 NoNewPrivileges"; return 1; }
+}
+
+@test "svc_create_adds_common_hardening" {
+    local body; body="$(declare -f svc_create)"
+    local d
+    for d in NoNewPrivileges=true PrivateTmp=true ProtectHome=true ProtectKernelTunables=true ProtectKernelModules=true RestrictSUIDSGID=true; do
+        [[ "$body" == *"$d"* ]] || { echo "svc_create 缺加固项：$d"; return 1; }
+    done
+}
+
+@test "rhel_package_names_are_mapped" {
+    # RHEL 系包名与 Debian 不同，映射必须存在，否则 README 的 RHEL 支持承诺不成立
+    local body; body="$(declare -f _os_pkg_name)"
+    # declare -f 会重排缩进，只匹配语句本身
+    [[ "$body" == *'iproute2)'* && "$body" == *'p="iproute"'* ]] || { echo "缺 iproute2→iproute 映射"; return 1; }
+    [[ "$body" == *'cron)'* && "$body" == *'p="cronie"'* ]] || { echo "缺 cron→cronie 映射"; return 1; }
+}
+
+@test "snell_meta_v5_reports_udp" {
+    write_db '{"installed":["snell"],"settings":{},"snell":{"port":"9002","psk":"testpsk1234567890","version":"5.0.1","major":"5"}}'
+    run proto_snell_meta
+    [ "$status" -eq 0 ]
+    grep -qx 'udp=yes' <<< "$output" || { echo "v5 meta 应报 udp=yes：$output"; return 1; }
+}
+
+@test "status_json_is_valid_escaped_json" {
+    # 状态行含引号/反斜杠时，--status --format json 仍须输出合法 JSON
+    write_db '{"installed":[],"settings":{}}'
+    oc_status_line() { printf '已停止 "quoted" \\ path'; }
+    OC_ARG_FORMAT=json
+    run cli_status
+    [ "$status" -eq 0 ] || { echo "cli_status 失败：$output"; return 1; }
+    printf '%s' "$output" | jq -e . >/dev/null || { echo "输出不是合法 JSON：$output"; return 1; }
+}
+
+@test "net_ipv6_caches_probe_result" {
+    # 探测成功后必须写回 settings.ip6，避免订阅渲染反复外联
+    local body; body="$(declare -f net_ipv6)"
+    [[ "$body" == *'db_setting ip6 "$ip"'* ]] || { echo "net_ipv6 未缓存结果"; return 1; }
+}
+
+@test "dl_fetch_mirror_first_when_configured" {
+    # 配了 gh_proxy 时镜像优先，直连兜底
+    local body; body="$(declare -f dl_fetch)"
+    [[ "$body" == *'urls=("$m" "$url")'* ]] || { echo "镜像未排到首位"; return 1; }
 }
 
 @test "hy2_version_falls_back_to_official_api" {

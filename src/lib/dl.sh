@@ -23,10 +23,16 @@ dl_mirror_url() {
 # dl_fetch <url> <out> [sha256]
 dl_fetch() {
     local url="$1" out="$2" sha="${3:-}"
-    local -a urls=("$url")
+    local -a urls=()
     local m tmp src attempt ok=0
     m="$(dl_mirror_url "$url")"
-    [[ "$m" != "$url" ]] && urls+=("$m")
+    # 配了镜像就优先走镜像：国内用户设镜像正是因为直连不通，
+    # 先试直连要白耗 3×10s 连接超时才轮到镜像。镜像失败再回退直连。
+    if [[ "$m" != "$url" ]]; then
+        urls=("$m" "$url")
+    else
+        urls=("$url")
+    fi
     mkdir -p "$(dirname "$out")" 2>/dev/null || true
     tmp="${out}.part.$$"
     for src in "${urls[@]}"; do
@@ -88,7 +94,7 @@ dl_hy2_latest_tag() {
     printf '%s' "$out"
 }
 
-# dl_asset_digest <owner/repo> <tag> <asset-name># dl_asset_digest <owner/repo> <tag> <asset-name> -> 输出该资产的 sha256（小写十六进制）
+# dl_asset_digest <owner/repo> <tag> <asset-name> -> 输出该资产的 sha256（小写十六进制）
 #
 # GitHub 的 release API 为每个资产提供 digest 字段（形如 "sha256:<hex>"），
 # 这样任意版本都能动态取到官方哈希，不必在代码里维护"版本 → 哈希"静态表。

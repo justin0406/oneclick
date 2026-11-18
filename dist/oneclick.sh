@@ -116,9 +116,24 @@ os_pkg_has() {
     esac
 }
 
+# 脚本内部用统一包名，安装时按发行族映射到真实包名。
+# Debian 的 iproute2 / cron 在 RHEL 系叫 iproute / cronie；不映射会让
+# "RHEL 9 compatible" 的承诺在第一步装依赖时就失败。
+_os_pkg_name() {
+    local p="$1"
+    if [[ "$(os_family)" == "rhel" ]]; then
+        case "$p" in
+            iproute2) p="iproute" ;;
+            cron)     p="cronie" ;;
+        esac
+    fi
+    printf '%s' "$p"
+}
+
 os_pkg_install() {
     local -a pkgs=() need=() p
     for p in "$@"; do
+        p="$(_os_pkg_name "$p")"
         os_pkg_has "$p" && continue
         need+=("$p")
     done
@@ -641,10 +656,16 @@ dl_mirror_url() {
 # dl_fetch <url> <out> [sha256]
 dl_fetch() {
     local url="$1" out="$2" sha="${3:-}"
-    local -a urls=("$url")
+    local -a urls=()
     local m tmp src attempt ok=0
     m="$(dl_mirror_url "$url")"
-    [[ "$m" != "$url" ]] && urls+=("$m")
+    # 配了镜像就优先走镜像：国内用户设镜像正是因为直连不通，
+    # 先试直连要白耗 3×10s 连接超时才轮到镜像。镜像失败再回退直连。
+    if [[ "$m" != "$url" ]]; then
+        urls=("$m" "$url")
+    else
+        urls=("$url")
+    fi
     mkdir -p "$(dirname "$out")" 2>/dev/null || true
     tmp="${out}.part.$$"
     for src in "${urls[@]}"; do
@@ -706,7 +727,7 @@ dl_hy2_latest_tag() {
     printf '%s' "$out"
 }
 
-# dl_asset_digest <owner/repo> <tag> <asset-name># dl_asset_digest <owner/repo> <tag> <asset-name> -> 输出该资产的 sha256（小写十六进制）
+# dl_asset_digest <owner/repo> <tag> <asset-name> -> 输出该资产的 sha256（小写十六进制）
 #
 # GitHub 的 release API 为每个资产提供 digest 字段（形如 "sha256:<hex>"），
 # 这样任意版本都能动态取到官方哈希，不必在代码里维护"版本 → 哈希"静态表。
@@ -967,6 +988,9 @@ net_ipv6() {
     for url in https://api6.ipify.org https://ipv6.icanhazip.com https://v6.ip.sb; do
         ip="$(curl -6 -fsS --connect-timeout 5 --max-time 10 "$url" 2>/dev/null | tr -d '[:space:]')"
         if _net_is_ipv6 "$ip"; then
+            # 探测成功就落缓存：订阅渲染每种格式都会调 share_ip_list，
+            # 不缓存 then 每次都走一遍多源 curl，慢且容易触发服务限流。
+            db_setting ip6 "$ip" >/dev/null 2>&1 || true
             printf '%s' "$ip"
             return 0
         fi
@@ -1039,17 +1063,19 @@ net_port_random() {
 }
 
 # net_port_pick <start_hint> <tcp|udp>：从 hint 起找空闲端口（先向上，再回头扫 1024+）
+# 每个候选都 spawn 一次 ss+awk，最坏情况逐端口扫 6.5 万次会拖死安装；
+# 封顶 500 个候选，正常机器第一个就命中，极端情况宁可让调用方报错。
 net_port_pick() {
-    local start proto p
+    local start proto p n=0
     start="$(_net_port_num "${1:-8443}")" || start=8443
     proto="${2:-tcp}"
-    for ((p = start; p <= 65535; p++)); do
+    for ((p = start; p <= 65535 && n < 500; p++, n++)); do
         if ! net_port_in_use "$p" "$proto"; then
             printf '%s' "$p"
             return 0
         fi
     done
-    for ((p = 1024; p < start; p++)); do
+    for ((p = 1024; p < start && n < 500; p++, n++)); do
         if ! net_port_in_use "$p" "$proto"; then
             printf '%s' "$p"
             return 0
@@ -1434,7 +1460,7 @@ cert_unregister_user() {
     done
 }
 
-# 生成 acme.sh 的 reloadcmd：重启所有登记在案的 unit。# 生成 acme.sh 的 reloadcmd：重启所有登记在案的 unit。
+# 生成 acme.sh 的 reloadcmd：重启所有登记在案的 unit。
 # 用 restart 而非 reload：这些内核多数没有真正的 reload 语义，
 # restart 是唯一能确保读到新证书的方式。
 cert_reload_cmd() {
@@ -1452,7 +1478,7 @@ cert_reload_cmd() {
     printf '%s' "${cmd%; }"
 }
 
-# cert_acme <domain> <outdir>：acme.sh + HTTP-01（--standalone --httpport 80）# cert_acme <domain> <outdir>：acme.sh + HTTP-01（--standalone --httpport 80）
+# cert_acme <domain> <outdir>：acme.sh + HTTP-01（--standalone --httpport 80）
 cert_acme() {
     local domain="$1" outdir="$2" acme crt key email issued=1 plog
     if [[ -z "$domain" || -z "$outdir" ]]; then
@@ -1679,7 +1705,7 @@ _cert_pick_existing() {
     printf '%s' "${names[$((sel - 1))]}"
 }
 
-# 交互式选择证书方式：用编号菜单而不是让人背英文单词。# 交互式选择证书方式：用编号菜单而不是让人背英文单词。
+# 交互式选择证书方式：用编号菜单而不是让人背英文单词。
 # 默认项排在最前并在标签里标出，回车即选它。
 _cert_choose_mode() {
     local def="${1:-self}"
@@ -1763,11 +1789,15 @@ cert_ensure() {
         if [[ "$mode" != "acme" ]] || ! _cert_is_selfsigned "$shared_crt"; then
             if _cert_covers "$shared_crt" "$hint" &&
                openssl x509 -in "$shared_crt" -noout -checkend $((30 * 86400)) >/dev/null 2>&1; then
+                local reused_self=0
+                _cert_is_selfsigned "$shared_crt" && reused_self=1
                 CERT_PATH="$shared_crt"
                 KEY_PATH="$shared_key"
                 SNI="$(cert_detect "$shared_crt" 2>/dev/null || printf '%s' "$hint")"
-                CERT_MODE="existing"
-                oc_ok "复用已有证书（$hint）：$shared_crt"
+                # 复用的自签证书必须仍标记成 self：hy2/anytls 据此在客户端链接里
+                # 写 insecure=1。误标成 existing 会让客户端校验自签证书而连接失败。
+                CERT_MODE="$([[ $reused_self == 1 ]] && printf 'self' || printf 'existing')"
+                oc_ok "复用已有证书（$hint，$([[ $reused_self == 1 ]] && printf '自签' || printf 'CA 签发')）：$shared_crt"
                 return 0
             fi
         fi
@@ -1961,6 +1991,14 @@ ExecStart=$exec
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=32767
+# 通用加固：五个内核都不需要写家目录/系统目录、加载内核模块或提权。
+# hysteria 的 CAP_NET_ADMIN 走 netlink 管 nft 规则，不受 ProtectKernelTunables 影响。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
 EOF
         for line in "$@"; do
             printf '%s\n' "$line"
@@ -3327,15 +3365,14 @@ EOF
 
 ocp_hy2_write_unit() {
     # 沙箱参数与官方 get.hy2.sh 生成的 unit 一致：hysteria 需要三个能力
-    # （NET_ADMIN 管端口跳跃的 nft 转发、NET_BIND_SERVICE 绑低端口、NET_RAW），
-    # NoNewPrivileges 禁止提权。其余内核没有官方参照，先不动。
+    # （NET_ADMIN 管端口跳跃的 nft 转发、NET_BIND_SERVICE 绑低端口、NET_RAW）。
+    # 其余加固项（NoNewPrivileges 等）已由 svc_create 统一写入。
     svc_create "$(oc_unit_name hysteria2)" \
         "${OC_BIN_DIR}/hysteria server -c $(ocp_hy2_cfg)" \
         "OneClick Hysteria2" \
         "Environment=HYSTERIA_LOG_LEVEL=info" \
         "CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW" \
-        "AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW" \
-        "NoNewPrivileges=true"
+        "AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW"
 }
 
 # 清理 hysteria 端口跳跃留下的 nft 表（table ip/ip6 hysteria_<hash>）。
@@ -4189,10 +4226,13 @@ ocp_snell_host() {
 # ---------- SPEC §10 契约函数 ----------
 
 proto_snell_meta() {
+    local major
+    major="$(ocp_snell_db_major)"
     printf 'title=%s\n' "$(ocp_snell_name)"
     printf 'desc=Snell v6 单端口 TCP，抗主动探测强；v6 用 mode 取代 obfs\n'
     printf 'port=%s\n' "$(db_get snell port "")"
-    printf 'udp=no\n'
+    # v5 是 QUIC，TCP+UDP 都要；菜单改端口靠这个字段决定查几侧占用
+    [[ "$major" == "5" ]] && printf 'udp=yes\n' || printf 'udp=no\n'
     printf 'cert=no\n'
 }
 
@@ -7053,6 +7093,18 @@ main_menu() {
 
 # ---------- CLI ----------
 
+# --check-ip：重新探测公网 v4/v6 并刷新缓存，供订阅渲染与节点链接使用。
+cli_check_ip() {
+    local v4 v6
+    v4="$(net_primary_ip)"
+    v6="$(net_ipv6)"
+    [[ -n "$v4" ]] && db_setting ip "$v4"
+    # net_ipv6 探测成功时已自行缓存；这里覆盖写一次（空则不写，避免清掉旧值）
+    [[ -n "$v6" ]] && db_setting ip6 "$v6"
+    oc_kv "公网 IPv4" "${v4:-未探测到}"
+    oc_kv "公网 IPv6" "${v6:-未探测到（单栈属正常）}"
+}
+
 cli_list() {
     local k
     printf '%-16s %-8s %-7s %s\n' "KEY" "端口" "状态" "说明"
@@ -7066,16 +7118,23 @@ cli_list() {
 cli_status() {
     local k
     if [[ "$OC_ARG_FORMAT" == "json" ]]; then
-        local out='{"version":"'"$OC_VERSION"'","os":"'"$OC_OS_ID"'","arch":"'"$OC_ARCH"'","protos":{'
-        local first=1 inst
+        # 用 jq 构造而不是字符串拼接：状态行/端口里可能出现引号或反斜杠，
+        # 手工拼 JSON 会生成非法文档（--status --format json 直接崩）。
+        # 每个协议先用 jq -n 生成一条独立对象（转义交给 jq），再汇总成一个数组。
+        local -a parts=() inst=false
         for k in "${OC_PROTOS[@]}"; do
-            [[ "$first" == "1" ]] || out+=','
-            first=0
-            if db_is_installed "$k"; then inst="true"; else inst="false"; fi
-            out+="\"$k\":{\"installed\":$inst,\"port\":\"$(db_get "$k" port '')\",\"status\":\"$(oc_status_line "$k")\",\"unit\":\"$(oc_unit_name "$k")\"}"
+            inst=false
+            db_is_installed "$k" && inst=true
+            parts+=("$(jq -n --arg k "$k" --argjson inst "$inst" \
+                --arg port "$(db_get "$k" port '')" \
+                --arg status "$(oc_status_line "$k")" \
+                --arg unit "$(oc_unit_name "$k")" \
+                '{key: $k, installed: $inst, port: $port, status: $status, unit: $unit}')")
         done
-        out+='}}'
-        printf '%s\n' "$out" | jq .
+        printf '%s\n' "${parts[@]}" | jq -s \
+            --arg version "$OC_VERSION" --arg os "$OC_OS_ID" --arg arch "$OC_ARCH" \
+            '{version: $version, os: $os, arch: $arch,
+              protos: (reduce .[] as $p ({}; .[$p.key] = ($p | del(.key))))}'
         return 0
     fi
     printf '%-16s %-8s %s\n' "协议" "端口" "状态"
@@ -7143,6 +7202,7 @@ cli_run() {
         status)    cli_status ;;
         list)      cli_list ;;
         cert-status) cert_status ;;
+        check-ip)  cli_check_ip ;;
         sub)       local f; local -a fs=(uri clash surge loon)
                    [[ -n "${OC_ARG_FORMAT:-}" ]] && fs=("$OC_ARG_FORMAT")
                    for f in "${fs[@]}"; do share_render_sub "$f" || exit 1; done ;;
@@ -7173,6 +7233,7 @@ OneClick 一键多协议代理安装器
   oneclick --sub [--format uri|clash|surge|loon|singbox]
                                                生成节点片段（默认不含 sing-box）
   oneclick --cert-status
+  oneclick --check-ip                          重新探测并缓存公网 IPv4/IPv6
   oneclick --purge                             彻底卸载（协议+内核+配置+残留）
   oneclick --version | --help
 
@@ -7187,7 +7248,7 @@ oc_parse_args() {
                 [[ -n "${2:-}" ]] || oc_die "$1 需要协议 key（或 all）"
                 OC_CLI_ACTION="${1#--}"
                 OC_CLI_KEY="$2"; shift 2 ;;
-            --status|--list|--cert-status|--sub|--purge|--version|--help)
+            --status|--list|--cert-status|--check-ip|--sub|--purge|--version|--help)
                 OC_CLI_ACTION="${1#--}"; shift ;;
             --port)   [[ -n "${2:-}" ]] || oc_die "--port 需要端口"; OC_ARG_PORT="$2"; shift 2 ;;
             --domain) [[ -n "${2:-}" ]] || oc_die "--domain 需要域名"; OC_ARG_DOMAIN="$2"; shift 2 ;;

@@ -25,6 +25,14 @@ ExecStart=$exec
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=32767
+# 通用加固：五个内核都不需要写家目录/系统目录、加载内核模块或提权。
+# hysteria 的 CAP_NET_ADMIN 走 netlink 管 nft 规则，不受 ProtectKernelTunables 影响。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
 EOF
         for line in "$@"; do
             printf '%s\n' "$line"

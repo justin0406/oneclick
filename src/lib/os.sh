@@ -37,9 +37,24 @@ os_pkg_has() {
     esac
 }
 
+# 脚本内部用统一包名，安装时按发行族映射到真实包名。
+# Debian 的 iproute2 / cron 在 RHEL 系叫 iproute / cronie；不映射会让
+# "RHEL 9 compatible" 的承诺在第一步装依赖时就失败。
+_os_pkg_name() {
+    local p="$1"
+    if [[ "$(os_family)" == "rhel" ]]; then
+        case "$p" in
+            iproute2) p="iproute" ;;
+            cron)     p="cronie" ;;
+        esac
+    fi
+    printf '%s' "$p"
+}
+
 os_pkg_install() {
     local -a pkgs=() need=() p
     for p in "$@"; do
+        p="$(_os_pkg_name "$p")"
         os_pkg_has "$p" && continue
         need+=("$p")
     done

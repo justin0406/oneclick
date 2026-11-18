@@ -193,6 +193,7 @@ oneclick --list
 oneclick --sub [--format uri|clash|surge|loon|singbox]
                                                 node snippets (sing-box opt-in)
 oneclick --cert-status
+oneclick --check-ip                             re-probe and cache public IPv4/IPv6
 oneclick --purge                                full removal (type PURGE to confirm)
 oneclick --version | --help
 ```

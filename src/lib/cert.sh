@@ -346,7 +346,7 @@ cert_unregister_user() {
     done
 }
 
-# 生成 acme.sh 的 reloadcmd：重启所有登记在案的 unit。# 生成 acme.sh 的 reloadcmd：重启所有登记在案的 unit。
+# 生成 acme.sh 的 reloadcmd：重启所有登记在案的 unit。
 # 用 restart 而非 reload：这些内核多数没有真正的 reload 语义，
 # restart 是唯一能确保读到新证书的方式。
 cert_reload_cmd() {
@@ -364,7 +364,7 @@ cert_reload_cmd() {
     printf '%s' "${cmd%; }"
 }
 
-# cert_acme <domain> <outdir>：acme.sh + HTTP-01（--standalone --httpport 80）# cert_acme <domain> <outdir>：acme.sh + HTTP-01（--standalone --httpport 80）
+# cert_acme <domain> <outdir>：acme.sh + HTTP-01（--standalone --httpport 80）
 cert_acme() {
     local domain="$1" outdir="$2" acme crt key email issued=1 plog
     if [[ -z "$domain" || -z "$outdir" ]]; then
@@ -591,7 +591,7 @@ _cert_pick_existing() {
     printf '%s' "${names[$((sel - 1))]}"
 }
 
-# 交互式选择证书方式：用编号菜单而不是让人背英文单词。# 交互式选择证书方式：用编号菜单而不是让人背英文单词。
+# 交互式选择证书方式：用编号菜单而不是让人背英文单词。
 # 默认项排在最前并在标签里标出，回车即选它。
 _cert_choose_mode() {
     local def="${1:-self}"
@@ -675,11 +675,15 @@ cert_ensure() {
         if [[ "$mode" != "acme" ]] || ! _cert_is_selfsigned "$shared_crt"; then
             if _cert_covers "$shared_crt" "$hint" &&
                openssl x509 -in "$shared_crt" -noout -checkend $((30 * 86400)) >/dev/null 2>&1; then
+                local reused_self=0
+                _cert_is_selfsigned "$shared_crt" && reused_self=1
                 CERT_PATH="$shared_crt"
                 KEY_PATH="$shared_key"
                 SNI="$(cert_detect "$shared_crt" 2>/dev/null || printf '%s' "$hint")"
-                CERT_MODE="existing"
-                oc_ok "复用已有证书（$hint）：$shared_crt"
+                # 复用的自签证书必须仍标记成 self：hy2/anytls 据此在客户端链接里
+                # 写 insecure=1。误标成 existing 会让客户端校验自签证书而连接失败。
+                CERT_MODE="$([[ $reused_self == 1 ]] && printf 'self' || printf 'existing')"
+                oc_ok "复用已有证书（$hint，$([[ $reused_self == 1 ]] && printf '自签' || printf 'CA 签发')）：$shared_crt"
                 return 0
             fi
         fi

@@ -76,6 +76,9 @@ net_ipv6() {
     for url in https://api6.ipify.org https://ipv6.icanhazip.com https://v6.ip.sb; do
         ip="$(curl -6 -fsS --connect-timeout 5 --max-time 10 "$url" 2>/dev/null | tr -d '[:space:]')"
         if _net_is_ipv6 "$ip"; then
+            # 探测成功就落缓存：订阅渲染每种格式都会调 share_ip_list，
+            # 不缓存 then 每次都走一遍多源 curl，慢且容易触发服务限流。
+            db_setting ip6 "$ip" >/dev/null 2>&1 || true
             printf '%s' "$ip"
             return 0
         fi
@@ -148,17 +151,19 @@ net_port_random() {
 }
 
 # net_port_pick <start_hint> <tcp|udp>：从 hint 起找空闲端口（先向上，再回头扫 1024+）
+# 每个候选都 spawn 一次 ss+awk，最坏情况逐端口扫 6.5 万次会拖死安装；
+# 封顶 500 个候选，正常机器第一个就命中，极端情况宁可让调用方报错。
 net_port_pick() {
-    local start proto p
+    local start proto p n=0
     start="$(_net_port_num "${1:-8443}")" || start=8443
     proto="${2:-tcp}"
-    for ((p = start; p <= 65535; p++)); do
+    for ((p = start; p <= 65535 && n < 500; p++, n++)); do
         if ! net_port_in_use "$p" "$proto"; then
             printf '%s' "$p"
             return 0
         fi
     done
-    for ((p = 1024; p < start; p++)); do
+    for ((p = 1024; p < start && n < 500; p++, n++)); do
         if ! net_port_in_use "$p" "$proto"; then
             printf '%s' "$p"
             return 0

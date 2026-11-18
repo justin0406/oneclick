@@ -136,15 +136,14 @@ EOF
 
 ocp_hy2_write_unit() {
     # 沙箱参数与官方 get.hy2.sh 生成的 unit 一致：hysteria 需要三个能力
-    # （NET_ADMIN 管端口跳跃的 nft 转发、NET_BIND_SERVICE 绑低端口、NET_RAW），
-    # NoNewPrivileges 禁止提权。其余内核没有官方参照，先不动。
+    # （NET_ADMIN 管端口跳跃的 nft 转发、NET_BIND_SERVICE 绑低端口、NET_RAW）。
+    # 其余加固项（NoNewPrivileges 等）已由 svc_create 统一写入。
     svc_create "$(oc_unit_name hysteria2)" \
         "${OC_BIN_DIR}/hysteria server -c $(ocp_hy2_cfg)" \
         "OneClick Hysteria2" \
         "Environment=HYSTERIA_LOG_LEVEL=info" \
         "CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW" \
-        "AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW" \
-        "NoNewPrivileges=true"
+        "AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW"
 }
 
 # 清理 hysteria 端口跳跃留下的 nft 表（table ip/ip6 hysteria_<hash>）。

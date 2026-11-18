@@ -168,6 +168,7 @@ oneclick --list
 oneclick --sub [--format uri|clash|surge|loon|singbox]
                                                 节点片段（sing-box 需显式指定）
 oneclick --cert-status
+oneclick --check-ip                             重新探测并缓存公网 IPv4/IPv6
 oneclick --purge                                彻底卸载（输入 PURGE 确认）
 oneclick --version | --help
 ```

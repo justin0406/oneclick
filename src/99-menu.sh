@@ -538,6 +538,18 @@ main_menu() {
 
 # ---------- CLI ----------
 
+# --check-ip：重新探测公网 v4/v6 并刷新缓存，供订阅渲染与节点链接使用。
+cli_check_ip() {
+    local v4 v6
+    v4="$(net_primary_ip)"
+    v6="$(net_ipv6)"
+    [[ -n "$v4" ]] && db_setting ip "$v4"
+    # net_ipv6 探测成功时已自行缓存；这里覆盖写一次（空则不写，避免清掉旧值）
+    [[ -n "$v6" ]] && db_setting ip6 "$v6"
+    oc_kv "公网 IPv4" "${v4:-未探测到}"
+    oc_kv "公网 IPv6" "${v6:-未探测到（单栈属正常）}"
+}
+
 cli_list() {
     local k
     printf '%-16s %-8s %-7s %s\n' "KEY" "端口" "状态" "说明"
@@ -551,16 +563,23 @@ cli_list() {
 cli_status() {
     local k
     if [[ "$OC_ARG_FORMAT" == "json" ]]; then
-        local out='{"version":"'"$OC_VERSION"'","os":"'"$OC_OS_ID"'","arch":"'"$OC_ARCH"'","protos":{'
-        local first=1 inst
+        # 用 jq 构造而不是字符串拼接：状态行/端口里可能出现引号或反斜杠，
+        # 手工拼 JSON 会生成非法文档（--status --format json 直接崩）。
+        # 每个协议先用 jq -n 生成一条独立对象（转义交给 jq），再汇总成一个数组。
+        local -a parts=() inst=false
         for k in "${OC_PROTOS[@]}"; do
-            [[ "$first" == "1" ]] || out+=','
-            first=0
-            if db_is_installed "$k"; then inst="true"; else inst="false"; fi
-            out+="\"$k\":{\"installed\":$inst,\"port\":\"$(db_get "$k" port '')\",\"status\":\"$(oc_status_line "$k")\",\"unit\":\"$(oc_unit_name "$k")\"}"
+            inst=false
+            db_is_installed "$k" && inst=true
+            parts+=("$(jq -n --arg k "$k" --argjson inst "$inst" \
+                --arg port "$(db_get "$k" port '')" \
+                --arg status "$(oc_status_line "$k")" \
+                --arg unit "$(oc_unit_name "$k")" \
+                '{key: $k, installed: $inst, port: $port, status: $status, unit: $unit}')")
         done
-        out+='}}'
-        printf '%s\n' "$out" | jq .
+        printf '%s\n' "${parts[@]}" | jq -s \
+            --arg version "$OC_VERSION" --arg os "$OC_OS_ID" --arg arch "$OC_ARCH" \
+            '{version: $version, os: $os, arch: $arch,
+              protos: (reduce .[] as $p ({}; .[$p.key] = ($p | del(.key))))}'
         return 0
     fi
     printf '%-16s %-8s %s\n' "协议" "端口" "状态"
@@ -628,6 +647,7 @@ cli_run() {
         status)    cli_status ;;
         list)      cli_list ;;
         cert-status) cert_status ;;
+        check-ip)  cli_check_ip ;;
         sub)       local f; local -a fs=(uri clash surge loon)
                    [[ -n "${OC_ARG_FORMAT:-}" ]] && fs=("$OC_ARG_FORMAT")
                    for f in "${fs[@]}"; do share_render_sub "$f" || exit 1; done ;;
@@ -658,6 +678,7 @@ OneClick 一键多协议代理安装器
   oneclick --sub [--format uri|clash|surge|loon|singbox]
                                                生成节点片段（默认不含 sing-box）
   oneclick --cert-status
+  oneclick --check-ip                          重新探测并缓存公网 IPv4/IPv6
   oneclick --purge                             彻底卸载（协议+内核+配置+残留）
   oneclick --version | --help
 
@@ -672,7 +693,7 @@ oc_parse_args() {
                 [[ -n "${2:-}" ]] || oc_die "$1 需要协议 key（或 all）"
                 OC_CLI_ACTION="${1#--}"
                 OC_CLI_KEY="$2"; shift 2 ;;
-            --status|--list|--cert-status|--sub|--purge|--version|--help)
+            --status|--list|--cert-status|--check-ip|--sub|--purge|--version|--help)
                 OC_CLI_ACTION="${1#--}"; shift ;;
             --port)   [[ -n "${2:-}" ]] || oc_die "--port 需要端口"; OC_ARG_PORT="$2"; shift 2 ;;
             --domain) [[ -n "${2:-}" ]] || oc_die "--domain 需要域名"; OC_ARG_DOMAIN="$2"; shift 2 ;;

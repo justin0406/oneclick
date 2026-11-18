@@ -321,10 +321,13 @@ ocp_snell_host() {
 # ---------- SPEC §10 契约函数 ----------
 
 proto_snell_meta() {
+    local major
+    major="$(ocp_snell_db_major)"
     printf 'title=%s\n' "$(ocp_snell_name)"
     printf 'desc=Snell v6 单端口 TCP，抗主动探测强；v6 用 mode 取代 obfs\n'
     printf 'port=%s\n' "$(db_get snell port "")"
-    printf 'udp=no\n'
+    # v5 是 QUIC，TCP+UDP 都要；菜单改端口靠这个字段决定查几侧占用
+    [[ "$major" == "5" ]] && printf 'udp=yes\n' || printf 'udp=no\n'
     printf 'cert=no\n'
 }
 
