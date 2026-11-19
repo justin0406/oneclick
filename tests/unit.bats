@@ -988,3 +988,93 @@ EOS
         fi
     done
 }
+
+# ---------- 菜单改端口 ----------
+
+# _menu_change_port: 0 / 65536 / 非数字在入口被拦，不写库、不触发 regen
+@test "menu_change_port_rejects_invalid_values" {
+    local dbset="${BATS_TEST_TMPDIR}/dbset.log"
+    : > "$dbset"
+    db_get() { [[ "$2" == "port" ]] && { printf '%s' "${OLD_PORT:-8080}"; return; }; printf '%s' "$3"; }
+    db_set() { printf '%s|%s|%s\n' "$@" >> "$dbset"; }
+    oc_ask() { printf '%s' "$MENU_INPUT"; }
+    oc_meta_field() { [[ "$2" == "udp" ]] && printf '%s' "${UDP_FIELD:-}"; return 0; }
+    net_port_in_use() { return 1; }
+    OC_CALL_N=0
+    oc_call() { OC_CALL_N=$((OC_CALL_N + 1)); return "${REGEN_RC:-0}"; }
+
+    for bad in 0 65536 70000 abc; do
+        MENU_INPUT="$bad" run _menu_change_port snell
+        [ "$status" -ne 0 ] || { echo "输入 $bad 未被拒绝"; return 1; }
+    done
+    [ ! -s "$dbset" ]
+    [ "$OC_CALL_N" -eq 0 ]
+}
+
+# _menu_change_port: 回车不改 → 直接返回，不碰库
+@test "menu_change_port_empty_input_noop" {
+    local dbset="${BATS_TEST_TMPDIR}/dbset.log"
+    : > "$dbset"
+    db_get() { [[ "$2" == "port" ]] && { printf '%s' "8080"; return; }; printf '%s' "$3"; }
+    db_set() { printf '%s|%s|%s\n' "$@" >> "$dbset"; }
+    oc_ask() { printf '%s' "$MENU_INPUT"; }
+    oc_meta_field() { return 0; }
+    net_port_in_use() { return 1; }
+    OC_CALL_N=0
+    oc_call() { OC_CALL_N=$((OC_CALL_N + 1)); return 0; }
+
+    MENU_INPUT="" run _menu_change_port snell
+    [ "$status" -eq 0 ]
+    [ ! -s "$dbset" ]
+    [ "$OC_CALL_N" -eq 0 ]
+}
+
+# _menu_change_port: 08080 规范化为 8080 再入库（旧代码会把 "08080" 原样写库）
+@test "menu_change_port_normalizes_leading_zeros" {
+    local dbset="${BATS_TEST_TMPDIR}/dbset.log"
+    : > "$dbset"
+    db_get() { [[ "$2" == "port" ]] && { printf '%s' "8080"; return; }; printf '%s' "$3"; }
+    db_set() { printf '%s|%s|%s\n' "$@" >> "$dbset"; }
+    oc_ask() { printf '%s' "08080"; }
+    oc_meta_field() { return 0; }
+    net_port_in_use() { return 1; }
+    OC_CALL_N=0
+    oc_call() { OC_CALL_N=$((OC_CALL_N + 1)); return 0; }
+
+    run _menu_change_port snell
+    [ "$status" -eq 0 ]
+    grep -q '^snell|port|8080$' "$dbset"
+}
+
+# _menu_change_port: tcp+udp 协议两侧都要查占用（udp 被占 → 拒绝）
+@test "menu_change_port_checks_udp_when_meta_says_udp" {
+    db_get() { [[ "$2" == "port" ]] && { printf '%s' "8080"; return; }; printf '%s' "$3"; }
+    db_set() { return 0; }
+    oc_ask() { printf '%s' "9090"; }
+    oc_meta_field() { [[ "$2" == "udp" ]] && printf 'yes'; return 0; }
+    net_port_in_use() { [[ "$2" == "udp" ]]; }
+
+    run _menu_change_port hysteria2
+    [ "$status" -ne 0 ]
+    grep -q "9090/udp 已被占用" <<< "$output"
+}
+
+# _menu_change_port: 首次 regen 失败 → 用旧端口回滚 db 并再 regen（不再被 oc_die 踢出菜单）
+@test "menu_change_port_rollback_on_regen_failure" {
+    local dbset="${BATS_TEST_TMPDIR}/dbset.log"
+    : > "$dbset"
+    db_get() { [[ "$2" == "port" ]] && { printf '%s' "8080"; return; }; printf '%s' "$3"; }
+    db_set() { printf '%s|%s|%s\n' "$@" >> "$dbset"; }
+    oc_ask() { printf '%s' "9090"; }
+    oc_meta_field() { return 0; }
+    net_port_in_use() { return 1; }
+    OC_CALL_N=0
+    oc_call() { OC_CALL_N=$((OC_CALL_N + 1)); if [ "$OC_CALL_N" -eq 1 ]; then return 1; fi; return 0; }
+
+    REGEN_RC=1 run _menu_change_port snell
+    [ "$status" -ne 0 ]
+    grep -q "已回滚" <<< "$output"
+    # 两次 db_set：先写新端口，失败后回写旧端口
+    grep -q '^snell|port|9090$' "$dbset"
+    grep -q '^snell|port|8080$' "$dbset"
+}

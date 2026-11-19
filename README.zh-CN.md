@@ -7,7 +7,7 @@
 把 VLESS-Reality、Hysteria2、Snell、SS-Rust、AnyTLS 五种服务端收进同一个命令行工具：
 安装、改端口、换凭据、升级内核、生成客户端配置、备份恢复、卸载，都在一个菜单里完成，不依赖任何面板。
 
-- 单文件发行：`dist/oneclick.sh`，约 7200 行，下载后即可运行
+- 单文件发行：`dist/oneclick.sh`，下载后即可运行
 - Debian 13 / Ubuntu 22.04+ 优先，CentOS Stream / RHEL 9 兼容
 - x86_64 / aarch64 / armv7l（AnyTLS 的 sing-box 不提供 i386）
 

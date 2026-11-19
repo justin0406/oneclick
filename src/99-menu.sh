@@ -150,7 +150,9 @@ _menu_change_port() {
     old="$(db_get "$k" port "")"
     new="$(oc_ask "新端口（当前 $old，回车不改）" "")"
     [[ -z "$new" || "$new" == "$old" ]] && return 0
-    [[ "$new" =~ ^[0-9]+$ ]] || { oc_err "端口必须是数字"; return 1; }
+    # 唯一权威校验器：非法值（0/65536/08080）在此拦截，入库的是去前导零的规范化值。
+    # 之前只查"是数字"，0/70000 能一路走到 regen，写库后各协议才在各自的校验里失败
+    new="$(_net_port_num "$new")" || { oc_err "端口需为 1-65535"; return 1; }
     # ss_rust / shadowtls 是 tcp+udp，meta 只能标一个；这类协议两侧都要查，
     # 否则改完端口 ssserver 会因 TCP 侧被占而起不来。
     local -a protos=("tcp")
@@ -307,7 +309,7 @@ menu_backup() {
 
 _bk_backup() {
     local f
-    f="/root/oneclick-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+    f="$OC_BACKUP_DIR/oneclick-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
     if tar -czf "$f" -C / etc/oneclick 2>/dev/null; then
         chmod 600 "$f"
         oc_ok "备份完成：$f"
@@ -343,6 +345,11 @@ _bk_restore() {
     fi
     oc_confirm "恢复会覆盖 /etc/oneclick，继续？" n || return 0
     tar -xzf "$f" -C / || { oc_err "解压失败"; return 1; }
+    # 恢复后先校验状态库可解析：损坏的 db.json 会让后续每个 db_* 调用静默失败
+    if ! jq -e . "$OC_DB" >/dev/null 2>&1; then
+        oc_err "备份内的 db.json 损坏（不是合法 JSON），请检查备份来源"
+        return 1
+    fi
     db_init
     oc_ok "已恢复，建议到节点管理里逐个重生成并重启"
 }
@@ -384,7 +391,7 @@ _bk_purge() {
         rm -rf -- "$HOME/.acme.sh"
         oc_info "已清理 acme.sh 与续期任务"
     fi
-    rm -rf -- "$OC_ROOT" /var/log/oneclick
+    rm -rf -- "$OC_ROOT" "$OC_LOG_DIR"
     bin_root_abs="$OC_BIN_ROOT"
     [[ -n "$bin_root_abs" && "$bin_root_abs" != "/" ]] && rm -rf -- "$bin_root_abs"
     rm -f -- "$OC_ENTRY" "$OC_ENTRY_DIR/oc"

@@ -55,8 +55,8 @@ ocp_vless_reality_port() {
         oc_err "没有找到可用端口（可指定 --port N）"
         return 1
     fi
-    [[ "$port" =~ ^[0-9]+$ ]] || { oc_err "端口必须是数字：$port"; return 1; }
-    ((port >= 1 && port <= 65535)) || { oc_err "端口超出范围：$port"; return 1; }
+    # 唯一权威校验器：与其他协议共用 _net_port_num（含位数上限与前导零处理）
+    _net_port_num "$port" >/dev/null || { oc_err "端口不合法（需 1-65535）：$port"; return 1; }
     if net_port_in_use "$port" tcp; then
         if [[ -n "$OC_ARG_PORT" ]]; then
             alt="$(net_port_pick "$port" tcp)"
@@ -504,7 +504,8 @@ proto_vless_reality_regen() {
     local key="vless_reality" port uuid priv pub sni sid dest cfg unit bin
     oc_require_root
     if ! db_has "$key"; then
-        oc_die "VLESS-Reality 未安装，无法重生成配置"
+        oc_err "VLESS-Reality 未安装，无法重生成配置"
+        return 1
     fi
     port="$(db_get "$key" port "")"
     uuid="$(db_get "$key" uuid "")"
@@ -514,6 +515,8 @@ proto_vless_reality_regen() {
     sid="$(db_get "$key" short_id "")"
     dest="$(db_get "$key" dest "")"
 
+    # regen 是可恢复操作：预期失败一律 oc_err + return 1，让菜单/CLI 拿到退出码
+    # 并走回滚（oc_die 会 exit 整个进程，菜单里的失败提示与回滚都执行不到）
     local missing=""
     [[ -z "$port" ]] && missing+=" port"
     [[ -z "$uuid" ]] && missing+=" uuid"
@@ -522,10 +525,10 @@ proto_vless_reality_regen() {
     [[ -z "$sni" ]] && missing+=" server_name"
     [[ -z "$sid" ]] && missing+=" short_id"
     [[ -z "$dest" ]] && missing+=" dest"
-    [[ -n "$missing" ]] && oc_die "状态库缺少字段：${missing# }（请重新安装）"
+    [[ -n "$missing" ]] && { oc_err "状态库缺少字段：${missing# }（请重新安装）"; return 1; }
 
     bin="$OC_BIN_DIR/xray"
-    [[ -x "$bin" ]] || oc_die "缺少 $bin，请重新安装"
+    [[ -x "$bin" ]] || { oc_err "缺少 $bin，请重新安装"; return 1; }
 
     local dir staging
     dir="$(oc_proto_dir "$key")"
@@ -536,14 +539,16 @@ proto_vless_reality_regen() {
     # 先写 staging 再自检：校验不过时在线配置原封不动，服务继续用旧配置跑
     if ! ocp_vless_reality_cfg_write "$port" "$uuid" "$priv" "$sni" "$sid" "$dest" "$staging" >/dev/null; then
         rm -f "$staging"
-        oc_die "写入配置失败"
+        oc_err "写入配置失败"
+        return 1
     fi
     if ! "$bin" run -test -c "$staging" >/dev/null 2>&1; then
         "$bin" run -test -c "$staging" 2>&1 | tail -n 20 >&2
         rm -f "$staging"
-        oc_die "新配置自检失败，已保留旧配置（请检查状态库字段）"
+        oc_err "新配置自检失败，已保留旧配置（请检查状态库字段）"
+        return 1
     fi
-    mv -f "$staging" "$cfg" || oc_die "替换配置失败：$cfg"
+    mv -f "$staging" "$cfg" || { oc_err "替换配置失败：$cfg"; return 1; }
     chmod 600 "$cfg" 2>/dev/null || true
 
     unit="$(oc_unit_name "$key")"
@@ -552,7 +557,7 @@ proto_vless_reality_regen() {
     if ! svc_is_active "$unit"; then
         oc_err "重启失败，最近日志："
         svc_logs "$unit" 30 >&2
-        oc_die "配置已重写但服务未起来，请检查日志"
+        return 1
     fi
     oc_ok "配置已重写并重启：$cfg"
     proto_vless_reality_status

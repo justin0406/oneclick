@@ -22,6 +22,9 @@ OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
 OC_SUB_DIR="$OC_ROOT/sub"
+# 日志目录只用于卸载清理（运行日志在 journald）；备份 tar.gz 输出目录
+OC_LOG_DIR="${OC_LOG_DIR:-/var/log/oneclick}"
+OC_BACKUP_DIR="${OC_BACKUP_DIR:-/root}"
 # 内核放私有目录，不碰 /usr/local/bin；/usr/local/bin 只放一个入口（卸载时删除）
 OC_BIN_ROOT="${OC_BIN_ROOT:-/opt/oneclick}"
 OC_BIN_DIR="${OC_BIN_DIR:-$OC_BIN_ROOT/bin}"
@@ -2607,8 +2610,8 @@ ocp_vless_reality_port() {
         oc_err "没有找到可用端口（可指定 --port N）"
         return 1
     fi
-    [[ "$port" =~ ^[0-9]+$ ]] || { oc_err "端口必须是数字：$port"; return 1; }
-    ((port >= 1 && port <= 65535)) || { oc_err "端口超出范围：$port"; return 1; }
+    # 唯一权威校验器：与其他协议共用 _net_port_num（含位数上限与前导零处理）
+    _net_port_num "$port" >/dev/null || { oc_err "端口不合法（需 1-65535）：$port"; return 1; }
     if net_port_in_use "$port" tcp; then
         if [[ -n "$OC_ARG_PORT" ]]; then
             alt="$(net_port_pick "$port" tcp)"
@@ -3056,7 +3059,8 @@ proto_vless_reality_regen() {
     local key="vless_reality" port uuid priv pub sni sid dest cfg unit bin
     oc_require_root
     if ! db_has "$key"; then
-        oc_die "VLESS-Reality 未安装，无法重生成配置"
+        oc_err "VLESS-Reality 未安装，无法重生成配置"
+        return 1
     fi
     port="$(db_get "$key" port "")"
     uuid="$(db_get "$key" uuid "")"
@@ -3066,6 +3070,8 @@ proto_vless_reality_regen() {
     sid="$(db_get "$key" short_id "")"
     dest="$(db_get "$key" dest "")"
 
+    # regen 是可恢复操作：预期失败一律 oc_err + return 1，让菜单/CLI 拿到退出码
+    # 并走回滚（oc_die 会 exit 整个进程，菜单里的失败提示与回滚都执行不到）
     local missing=""
     [[ -z "$port" ]] && missing+=" port"
     [[ -z "$uuid" ]] && missing+=" uuid"
@@ -3074,10 +3080,10 @@ proto_vless_reality_regen() {
     [[ -z "$sni" ]] && missing+=" server_name"
     [[ -z "$sid" ]] && missing+=" short_id"
     [[ -z "$dest" ]] && missing+=" dest"
-    [[ -n "$missing" ]] && oc_die "状态库缺少字段：${missing# }（请重新安装）"
+    [[ -n "$missing" ]] && { oc_err "状态库缺少字段：${missing# }（请重新安装）"; return 1; }
 
     bin="$OC_BIN_DIR/xray"
-    [[ -x "$bin" ]] || oc_die "缺少 $bin，请重新安装"
+    [[ -x "$bin" ]] || { oc_err "缺少 $bin，请重新安装"; return 1; }
 
     local dir staging
     dir="$(oc_proto_dir "$key")"
@@ -3088,14 +3094,16 @@ proto_vless_reality_regen() {
     # 先写 staging 再自检：校验不过时在线配置原封不动，服务继续用旧配置跑
     if ! ocp_vless_reality_cfg_write "$port" "$uuid" "$priv" "$sni" "$sid" "$dest" "$staging" >/dev/null; then
         rm -f "$staging"
-        oc_die "写入配置失败"
+        oc_err "写入配置失败"
+        return 1
     fi
     if ! "$bin" run -test -c "$staging" >/dev/null 2>&1; then
         "$bin" run -test -c "$staging" 2>&1 | tail -n 20 >&2
         rm -f "$staging"
-        oc_die "新配置自检失败，已保留旧配置（请检查状态库字段）"
+        oc_err "新配置自检失败，已保留旧配置（请检查状态库字段）"
+        return 1
     fi
-    mv -f "$staging" "$cfg" || oc_die "替换配置失败：$cfg"
+    mv -f "$staging" "$cfg" || { oc_err "替换配置失败：$cfg"; return 1; }
     chmod 600 "$cfg" 2>/dev/null || true
 
     unit="$(oc_unit_name "$key")"
@@ -3104,7 +3112,7 @@ proto_vless_reality_regen() {
     if ! svc_is_active "$unit"; then
         oc_err "重启失败，最近日志："
         svc_logs "$unit" 30 >&2
-        oc_die "配置已重写但服务未起来，请检查日志"
+        return 1
     fi
     oc_ok "配置已重写并重启：$cfg"
     proto_vless_reality_status
@@ -3250,11 +3258,9 @@ ocp_hy2_default_port() {
     printf '%s' "${port:-$(net_port_random)}"
 }
 
+# 端口校验统一委托 lib/net.sh 的 _net_port_num（唯一权威实现，含去前导零）
 ocp_hy2_port_ok() {
-    local p="${1:-}" n
-    [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
-    n=$((10#$p))
-    (( n >= 1 && n <= 65535 ))
+    _net_port_num "${1:-}" >/dev/null
 }
 
 # 端口段校验，合法则归一化为 "start-end"
@@ -3756,7 +3762,8 @@ proto_hysteria2_regen() {
     local unit port pw sni crt_file key_file obfs obfs_pw hop
     oc_require_root
     if ! db_is_installed hysteria2; then
-        oc_die "Hysteria2 未安装，无法重生成配置"
+        oc_err "Hysteria2 未安装，无法重生成配置"
+        return 1
     fi
     port="$(db_get hysteria2 port "")"
     pw="$(db_get hysteria2 password "")"
@@ -3767,15 +3774,20 @@ proto_hysteria2_regen() {
     obfs_pw="$(db_get hysteria2 obfs_password "")"
     hop="$(db_get hysteria2 hop "")"
 
-    ocp_hy2_port_ok "$port" || oc_die "数据库中的端口无效：${port:-空}"
-    [[ -n "$pw" ]] || oc_die "数据库中的密码为空，请重新安装"
+    # regen 是可恢复操作：预期失败一律 oc_err + return 1，让菜单/CLI 拿到退出码
+    # 并走回滚（oc_die 会 exit 整个进程，菜单里的失败提示与回滚都执行不到）
+    ocp_hy2_port_ok "$port" || { oc_err "数据库中的端口无效：${port:-空}"; return 1; }
+    [[ -n "$pw" ]] || { oc_err "数据库中的密码为空，请重新安装"; return 1; }
     if [[ -z "$crt_file" || -z "$key_file" || ! -f "$crt_file" || ! -f "$key_file" ]]; then
-        oc_die "数据库记录的证书不存在（cert=${crt_file:-空} key=${key_file:-空}），请重新安装以重新签发"
+        oc_err "数据库记录的证书不存在（cert=${crt_file:-空} key=${key_file:-空}），请重新安装以重新签发"
+        return 1
     fi
     [[ "$obfs" == "salamander" ]] || obfs="off"
 
-    ocp_hy2_write_config "$port" "$pw" "$crt_file" "$key_file" "$obfs" "$obfs_pw" "$hop" ||
-        oc_die "写入配置失败：$(ocp_hy2_cfg)"
+    ocp_hy2_write_config "$port" "$pw" "$crt_file" "$key_file" "$obfs" "$obfs_pw" "$hop" || {
+        oc_err "写入配置失败：$(ocp_hy2_cfg)"
+        return 1
+    }
     ocp_hy2_write_unit
     unit="$(oc_unit_name hysteria2)"
     svc_enable "$unit"
@@ -3784,7 +3796,7 @@ proto_hysteria2_regen() {
     if ! svc_is_active "$unit"; then
         oc_err "重启后服务未运行，最近日志："
         svc_logs "$unit" 30 >&2
-        oc_die "配置重生成后启动失败"
+        return 1
     fi
 
     oc_ok "配置已重生成并重启：$(ocp_hy2_cfg)"
@@ -4047,11 +4059,9 @@ ocp_snell_default_port() {
     printf '%s' "${port:-$(net_port_random)}"
 }
 
+# 端口校验统一委托 lib/net.sh 的 _net_port_num（唯一权威实现，含去前导零）
 ocp_snell_port_ok() {
-    local p="${1:-}" n
-    [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
-    n=$((10#$p))
-    ((n >= 1 && n <= 65535))
+    _net_port_num "${1:-}" >/dev/null
 }
 
 # 端口协商：OC_ARG_PORT > 状态库/meta 默认 > 交互；占用时报错并给候选端口。
@@ -4812,11 +4822,9 @@ ocp_ssrust_default_port() {
     printf '%s' "${port:-$(net_port_random)}"
 }
 
+# 端口校验统一委托 lib/net.sh 的 _net_port_num（唯一权威实现，含去前导零）
 ocp_ssrust_port_ok() {
-    local p="${1:-}" n
-    [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
-    n=$((10#$p))
-    ((n >= 1 && n <= 65535))
+    _net_port_num "${1:-}" >/dev/null
 }
 
 # OC_ARCH -> shadowsocks-rust release 的 target 段。
@@ -5985,11 +5993,9 @@ ocp_anytls_name() {
     printf '%s' "${OC_PROTO_TITLE[anytls]:-AnyTLS}"
 }
 
+# 端口校验统一委托 lib/net.sh 的 _net_port_num（唯一权威实现，含去前导零）
 ocp_anytls_port_ok() {
-    local p="${1:-}" n
-    [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
-    n=$((10#$p))
-    (( n >= 1 && n <= 65535 ))
+    _net_port_num "${1:-}" >/dev/null
 }
 
 # sing-box 资产架构别名：amd64/arm64/armv7（无 i386）
@@ -6443,7 +6449,8 @@ proto_anytls_regen() {
     local unit port pw sni crt_file key_file
     oc_require_root
     if ! db_is_installed anytls; then
-        oc_die "AnyTLS 未安装，无法重生成配置"
+        oc_err "AnyTLS 未安装，无法重生成配置"
+        return 1
     fi
     port="$(db_get anytls port "")"
     pw="$(db_get anytls password "")"
@@ -6451,15 +6458,20 @@ proto_anytls_regen() {
     crt_file="$(db_get anytls tls_cert "")"
     key_file="$(db_get anytls tls_key "")"
 
-    ocp_anytls_port_ok "$port" || oc_die "数据库中的端口无效：${port:-空}"
-    [[ -n "$pw" ]] || oc_die "数据库中的密码为空，请重新安装"
+    # regen 是可恢复操作：预期失败一律 oc_err + return 1，让菜单/CLI 拿到退出码
+    # 并走回滚（oc_die 会 exit 整个进程，菜单里的失败提示与回滚都执行不到）
+    ocp_anytls_port_ok "$port" || { oc_err "数据库中的端口无效：${port:-空}"; return 1; }
+    [[ -n "$pw" ]] || { oc_err "数据库中的密码为空，请重新安装"; return 1; }
     if [[ -z "$crt_file" || -z "$key_file" || ! -f "$crt_file" || ! -f "$key_file" ]]; then
-        oc_die "数据库记录的证书不存在（cert=${crt_file:-空} key=${key_file:-空}），请重新安装以重新签发"
+        oc_err "数据库记录的证书不存在（cert=${crt_file:-空} key=${key_file:-空}），请重新安装以重新签发"
+        return 1
     fi
 
-    ocp_anytls_write_config "$port" "$pw" "$sni" "$crt_file" "$key_file" ||
-        oc_die "写入配置失败：$(ocp_anytls_cfg)"
-    ocp_anytls_check_config || oc_die "配置校验未通过：$(ocp_anytls_cfg)"
+    ocp_anytls_write_config "$port" "$pw" "$sni" "$crt_file" "$key_file" || {
+        oc_err "写入配置失败：$(ocp_anytls_cfg)"
+        return 1
+    }
+    ocp_anytls_check_config || { oc_err "配置校验未通过：$(ocp_anytls_cfg)"; return 1; }
     ocp_anytls_write_unit
     unit="$(oc_unit_name anytls)"
     svc_enable "$unit"
@@ -6468,7 +6480,7 @@ proto_anytls_regen() {
     if ! svc_is_active "$unit"; then
         oc_err "重启后服务未运行，最近日志："
         svc_logs "$unit" 30
-        oc_die "配置重生成后启动失败"
+        return 1
     fi
     oc_ok "配置已重生成并重启：$(ocp_anytls_cfg)"
 }
@@ -6705,7 +6717,9 @@ _menu_change_port() {
     old="$(db_get "$k" port "")"
     new="$(oc_ask "新端口（当前 $old，回车不改）" "")"
     [[ -z "$new" || "$new" == "$old" ]] && return 0
-    [[ "$new" =~ ^[0-9]+$ ]] || { oc_err "端口必须是数字"; return 1; }
+    # 唯一权威校验器：非法值（0/65536/08080）在此拦截，入库的是去前导零的规范化值。
+    # 之前只查"是数字"，0/70000 能一路走到 regen，写库后各协议才在各自的校验里失败
+    new="$(_net_port_num "$new")" || { oc_err "端口需为 1-65535"; return 1; }
     # ss_rust / shadowtls 是 tcp+udp，meta 只能标一个；这类协议两侧都要查，
     # 否则改完端口 ssserver 会因 TCP 侧被占而起不来。
     local -a protos=("tcp")
@@ -6862,7 +6876,7 @@ menu_backup() {
 
 _bk_backup() {
     local f
-    f="/root/oneclick-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+    f="$OC_BACKUP_DIR/oneclick-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
     if tar -czf "$f" -C / etc/oneclick 2>/dev/null; then
         chmod 600 "$f"
         oc_ok "备份完成：$f"
@@ -6898,6 +6912,11 @@ _bk_restore() {
     fi
     oc_confirm "恢复会覆盖 /etc/oneclick，继续？" n || return 0
     tar -xzf "$f" -C / || { oc_err "解压失败"; return 1; }
+    # 恢复后先校验状态库可解析：损坏的 db.json 会让后续每个 db_* 调用静默失败
+    if ! jq -e . "$OC_DB" >/dev/null 2>&1; then
+        oc_err "备份内的 db.json 损坏（不是合法 JSON），请检查备份来源"
+        return 1
+    fi
     db_init
     oc_ok "已恢复，建议到节点管理里逐个重生成并重启"
 }
@@ -6939,7 +6958,7 @@ _bk_purge() {
         rm -rf -- "$HOME/.acme.sh"
         oc_info "已清理 acme.sh 与续期任务"
     fi
-    rm -rf -- "$OC_ROOT" /var/log/oneclick
+    rm -rf -- "$OC_ROOT" "$OC_LOG_DIR"
     bin_root_abs="$OC_BIN_ROOT"
     [[ -n "$bin_root_abs" && "$bin_root_abs" != "/" ]] && rm -rf -- "$bin_root_abs"
     rm -f -- "$OC_ENTRY" "$OC_ENTRY_DIR/oc"

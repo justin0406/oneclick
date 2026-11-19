@@ -83,7 +83,10 @@ defined="$(grep -oE '^[[:space:]]*[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*\(\)' "$OUT"
 # 只扫描"命令位"（行首/管道/&&/||/子shell/控制关键字之后）的 token，
 # 避免把 jq 字段字面量（cert_mode、cert_path 之类）误判成函数名
 called="$(perl -ne '
-    while (/(?:^|[;&|({]|\$\(|&&|\|\|)\s*(?:(?:if|then|elif|else|do|while|until|!)\s+)?((?:oc|ocp|proto|db|dl|os|net|cert|svc|share)_[A-Za-z0-9_]+)/g) {
+    # 前缀清单 = 公共前缀 + 实际存在的私有前缀（_menu/_bk/_cert/_cli/_db/_dl/_net/
+    # _oc/_os/_share/_up）。(?:_)? 让 _net_port_num 这类下划线私有函数也参与扫描，
+    # 它们之间有真实互调，漏扫会让未定义函数检查出现假绿。
+    while (/(?:^|[;&|({]|\$\(|&&|\|\|)\s*(?:(?:if|then|elif|else|do|while|until|!)\s+)?((?:_)?(?:oc|ocp|proto|db|dl|os|net|cert|svc|share|menu|bk|cli|up)_[A-Za-z0-9_]+)/g) {
         print "$1\n";
     }
 ' "$OUT" | sort -u)"
@@ -117,6 +120,19 @@ sha=$( (sha256sum "$OUT" 2>/dev/null || shasum -a 256 "$OUT") | awk "{print \$1}
 echo "✓ $OUT"
 echo "  行数: $lines  字节: $size"
 echo "  sha256: $sha"
-if [[ "$lines" -lt 1200 ]]; then
-    echo "! 注意：产物行数偏少（$lines），可能有模块未实现"
+# 模块哨兵：dist 必须包含每个源文件的拼接标记，缺一个说明整段模块丢了。
+# 行数下限拦不住"丢一整个中等模块"（阈值永远追不上代码量），哨兵是精确校验；
+# 00-header.sh 无拼接标记，用它的协议注册表代替。
+missing=""
+for f in "${FILES[@]}"; do
+    if [[ "$f" == "00-header.sh" ]]; then
+        grep -q '^OC_PROTOS=(' "$OUT" || missing+=" $f"
+    else
+        grep -q "# ===== $SRC/$f =====" "$OUT" || missing+=" $f"
+    fi
+done
+if [[ -n "$missing" ]]; then
+    echo "✗ 缺少模块哨兵：$missing"
+    exit 1
 fi
+echo "✓ 模块哨兵：${#FILES[@]}/${#FILES[@]}"

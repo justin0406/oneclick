@@ -70,11 +70,9 @@ ocp_ssrust_default_port() {
     printf '%s' "${port:-$(net_port_random)}"
 }
 
+# 端口校验统一委托 lib/net.sh 的 _net_port_num（唯一权威实现，含去前导零）
 ocp_ssrust_port_ok() {
-    local p="${1:-}" n
-    [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
-    n=$((10#$p))
-    ((n >= 1 && n <= 65535))
+    _net_port_num "${1:-}" >/dev/null
 }
 
 # OC_ARCH -> shadowsocks-rust release 的 target 段。

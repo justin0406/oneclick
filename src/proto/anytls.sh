@@ -42,11 +42,9 @@ ocp_anytls_name() {
     printf '%s' "${OC_PROTO_TITLE[anytls]:-AnyTLS}"
 }
 
+# 端口校验统一委托 lib/net.sh 的 _net_port_num（唯一权威实现，含去前导零）
 ocp_anytls_port_ok() {
-    local p="${1:-}" n
-    [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
-    n=$((10#$p))
-    (( n >= 1 && n <= 65535 ))
+    _net_port_num "${1:-}" >/dev/null
 }
 
 # sing-box 资产架构别名：amd64/arm64/armv7（无 i386）
@@ -500,7 +498,8 @@ proto_anytls_regen() {
     local unit port pw sni crt_file key_file
     oc_require_root
     if ! db_is_installed anytls; then
-        oc_die "AnyTLS 未安装，无法重生成配置"
+        oc_err "AnyTLS 未安装，无法重生成配置"
+        return 1
     fi
     port="$(db_get anytls port "")"
     pw="$(db_get anytls password "")"
@@ -508,15 +507,20 @@ proto_anytls_regen() {
     crt_file="$(db_get anytls tls_cert "")"
     key_file="$(db_get anytls tls_key "")"
 
-    ocp_anytls_port_ok "$port" || oc_die "数据库中的端口无效：${port:-空}"
-    [[ -n "$pw" ]] || oc_die "数据库中的密码为空，请重新安装"
+    # regen 是可恢复操作：预期失败一律 oc_err + return 1，让菜单/CLI 拿到退出码
+    # 并走回滚（oc_die 会 exit 整个进程，菜单里的失败提示与回滚都执行不到）
+    ocp_anytls_port_ok "$port" || { oc_err "数据库中的端口无效：${port:-空}"; return 1; }
+    [[ -n "$pw" ]] || { oc_err "数据库中的密码为空，请重新安装"; return 1; }
     if [[ -z "$crt_file" || -z "$key_file" || ! -f "$crt_file" || ! -f "$key_file" ]]; then
-        oc_die "数据库记录的证书不存在（cert=${crt_file:-空} key=${key_file:-空}），请重新安装以重新签发"
+        oc_err "数据库记录的证书不存在（cert=${crt_file:-空} key=${key_file:-空}），请重新安装以重新签发"
+        return 1
     fi
 
-    ocp_anytls_write_config "$port" "$pw" "$sni" "$crt_file" "$key_file" ||
-        oc_die "写入配置失败：$(ocp_anytls_cfg)"
-    ocp_anytls_check_config || oc_die "配置校验未通过：$(ocp_anytls_cfg)"
+    ocp_anytls_write_config "$port" "$pw" "$sni" "$crt_file" "$key_file" || {
+        oc_err "写入配置失败：$(ocp_anytls_cfg)"
+        return 1
+    }
+    ocp_anytls_check_config || { oc_err "配置校验未通过：$(ocp_anytls_cfg)"; return 1; }
     ocp_anytls_write_unit
     unit="$(oc_unit_name anytls)"
     svc_enable "$unit"
@@ -525,7 +529,7 @@ proto_anytls_regen() {
     if ! svc_is_active "$unit"; then
         oc_err "重启后服务未运行，最近日志："
         svc_logs "$unit" 30
-        oc_die "配置重生成后启动失败"
+        return 1
     fi
     oc_ok "配置已重生成并重启：$(ocp_anytls_cfg)"
 }

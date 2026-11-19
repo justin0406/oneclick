@@ -22,6 +22,9 @@ OC_ROOT="${OC_ROOT:-/etc/oneclick}"
 OC_DB="${OC_DB:-$OC_ROOT/db.json}"
 OC_CERT_DIR="$OC_ROOT/certs"
 OC_SUB_DIR="$OC_ROOT/sub"
+# 日志目录只用于卸载清理（运行日志在 journald）；备份 tar.gz 输出目录
+OC_LOG_DIR="${OC_LOG_DIR:-/var/log/oneclick}"
+OC_BACKUP_DIR="${OC_BACKUP_DIR:-/root}"
 # 内核放私有目录，不碰 /usr/local/bin；/usr/local/bin 只放一个入口（卸载时删除）
 OC_BIN_ROOT="${OC_BIN_ROOT:-/opt/oneclick}"
 OC_BIN_DIR="${OC_BIN_DIR:-$OC_BIN_ROOT/bin}"
