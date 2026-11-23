@@ -349,6 +349,18 @@ cert_unregister_user() {
 # 生成 acme.sh 的 reloadcmd：重启所有登记在案的 unit。
 # 用 restart 而非 reload：这些内核多数没有真正的 reload 语义，
 # restart 是唯一能确保读到新证书的方式。
+#
+# unit 名来自 db.json 的 cert_users_<domain>，而 db.json 可能被手工编辑或从
+# 备份恢复，所以这里必须按白名单过滤：这个名字会被拼进 crontab 以 root 执行的
+# 命令串，允许任意字符等于把 root 命令注入权交给任何能改 db 的人。
+_cert_unit_name_ok() {
+    local u="${1:-}"
+    # 登记的是 oc_unit_name 的输出，形态为 oneclick-<key>（不带 .service 后缀），
+    # 也允许显式带后缀的写法。字符集限定小写字母数字与 - _，杜绝空格/引号/分号
+    # 这类能把参数变成新命令的字符。
+    [[ "$u" =~ ^oneclick-[a-z0-9_-]+(\.service)?$ ]]
+}
+
 cert_reload_cmd() {
     local domain="$1" users u cmd=""
     users="$(db_get settings "cert_users_${domain}" "")"
@@ -359,14 +371,19 @@ cert_reload_cmd() {
     fi
     for u in ${users//,/ }; do
         [[ -n "$u" ]] || continue
-        cmd+="systemctl restart $u 2>/dev/null || true; "
+        if ! _cert_unit_name_ok "$u"; then
+            oc_warn "忽略非法证书使用者登记：$u（应为 oneclick-*.service）"
+            continue
+        fi
+        cmd+="systemctl restart '$u' 2>/dev/null || true; "
     done
+    [[ -n "$cmd" ]] || { printf 'true'; return 0; }
     printf '%s' "${cmd%; }"
 }
 
 # cert_acme <domain> <outdir>：acme.sh + HTTP-01（--standalone --httpport 80）
 cert_acme() {
-    local domain="$1" outdir="$2" acme crt key email issued=1 plog
+    local domain="$1" outdir="$2" acme crt key email issued=1 plog ascript
     if [[ -z "$domain" || -z "$outdir" ]]; then
         oc_err "cert_acme: 用法 cert_acme <domain> <outdir>"
         return 1
@@ -396,18 +413,31 @@ cert_acme() {
             || os_pkg_install socat cronie >/dev/null 2>&1 \
             || oc_warn "socat/cron 安装失败，ACME 可能不可用"
         email="admin@$domain"
-        # 安装脚本本身要从 GitHub 拉 master.tar.gz，偶发失败很常见：重试一次并保留日志
+        # 安装脚本本身要从 GitHub 拉 master.tar.gz，偶发失败很常见：重试一次并保留日志。
+        # 先落到文件再执行，不用 `curl | sh`：管道模式下 curl 中途断流，sh 会执行
+        # 半截脚本（前半段的 apt/rm 已经生效），且失败点无从复现。落盘后可先做
+        # 完整性判断，再交给 sh。
         plog="$(mktemp)" || plog="/tmp/oneclick-acme-install.$$.log"
+        ascript="$(mktemp)" || ascript=""
         local try rc=1
         for try in 1 2; do
-            if curl -fsSL --connect-timeout 10 --max-time 120 https://get.acme.sh 2>/dev/null \
-                    | sh -s "email=$email" >"$plog" 2>&1; then
+            if [[ -z "$ascript" ]]; then
+                oc_err "cert_acme: 无法创建临时文件"
+                rm -f -- "$plog"
+                return 1
+            fi
+            if curl -fsSL --connect-timeout 10 --max-time 120 https://get.acme.sh -o "$ascript" 2>/dev/null \
+                && [[ -s "$ascript" ]] \
+                && grep -q 'acme\.sh' "$ascript" 2>/dev/null \
+                && bash -n "$ascript" 2>/dev/null \
+                && sh "$ascript" "email=$email" >"$plog" 2>&1; then
                 rc=0
                 break
             fi
             oc_warn "acme.sh 安装失败（第 ${try} 次），10 秒后重试"
             ((try < 2)) && sleep 10
         done
+        rm -f -- "$ascript"
         if ((rc != 0)); then
             oc_err "cert_acme: acme.sh 安装失败（get.acme.sh 或 GitHub 下载不可达），最后几行日志："
             tail -5 "$plog" >&2

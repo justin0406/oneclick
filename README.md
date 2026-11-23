@@ -89,11 +89,15 @@ port hopping, hysteria itself installs and cleans up the redirect rules for its 
 **Downloads are verifiable.** All binaries go through one download layer: three retries, an optional
 mirror prefix (`OC_GH_PROXY`), `Cache-Control: no-cache` so a caching mirror cannot serve a stale
 binary, and rollback on failure so no half-written file is left behind. Verification, in order of
-preference: the GitHub release API's per-asset `digest` (works for any tag); the upstream checksum
-file when the project publishes one (Xray `.dgst`, Hysteria2 `hashes.txt`, shadowsocks-rust `.sha256`);
-the SHA-256 table in the code for pinned Snell and sing-box versions; and finally a structural check —
-the download must be a valid zip/gzip/xz archive or ELF binary — which blocks mirror error pages but
-not a hostile substitute. Prefer running without `OC_GH_PROXY` if you cannot trust your mirror.
+preference: the upstream checksum file when the project publishes one (Xray `.dgst`, Hysteria2
+`hashes.txt`, shadowsocks-rust `.sha256`); the GitHub release API's per-asset `digest`, which also
+covers projects that publish no checksum file; and the SHA-256 table in the code for pinned Snell and
+sing-box versions. **When no hash is obtainable at all** the behaviour depends on the route: a direct
+download from GitHub or the vendor site falls back to a structural check — the file must be a valid
+zip/gzip/xz archive or ELF binary, which blocks mirror error pages — while a download that went
+through a third-party mirror is **refused**, because a mirror can substitute the binary and without a
+hash there is nothing to compare against. Set `OC_ALLOW_UNVERIFIED=1` to proceed anyway if you trust
+your mirror.
 
 **It updates itself.** On every run the script fetches `dist/oneclick.sh` from this repository, compares
 the embedded `OC_VERSION`, atomically replaces itself and re-executes the new version immediately
@@ -209,11 +213,16 @@ a dual-stack host print one node per address (see *Layout* below).
 
 The build concatenates 16 modules into `dist/oneclick.sh` and runs four checks: `bash -n`,
 `shellcheck -S warning`, an undefined-function scan (command positions only, so jq field names are not
-misread), and duplicate-definition detection. Edit `src/`, never `dist/`.
+misread), and duplicate-definition detection. The output is written to a temporary file and only moved
+over `dist/oneclick.sh` after every check passes, so a failed build never leaves a truncated or
+half-written release artefact behind. Edit `src/`, never `dist/`.
+
+Pass `--strict` to make a missing `shellcheck` a build failure instead of a skip (CI uses it).
 
 CI (`.github/workflows/build.yml`) runs the same build on every push, plus the unit tests, a smoke
-test of `--version` / `--help`, a check that `dist/oneclick.sh` matches what `src/` produces, and a
-check that `README.zh-CN.md` was updated whenever `README.md` changes — the two must travel together.
+test of `--version` / `--help`, a check that `dist/oneclick.sh` matches what `src/` produces, linting
+of the helper scripts in `tools/`, and a bilingual check that `README.md` and `README.zh-CN.md` are
+changed together — in either direction.
 
 Requires **bash 4.0+** at runtime (`declare -gA`, `${var,,}`); bash 3.2 — the macOS default — exits
 immediately with a clear message. Every supported Linux target ships bash 4 or newer.

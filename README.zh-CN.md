@@ -77,11 +77,12 @@ ACME 需要一个**你自己拥有、且已解析到本机**的域名——没�
 
 **下载可验证。** 所有二进制走统一下载层：3 次重试、可选镜像前缀（`OC_GH_PROXY`）、
 `Cache-Control: no-cache`（防止缓存镜像返回旧版本二进制）、失败自动回滚不留下半截文件。
-校验按优先级依次尝试：GitHub release API 的逐资产 `digest`（任意版本都可用）→
-上游发布的校验文件（Xray `.dgst`、Hysteria2 `hashes.txt`、shadowsocks-rust `.sha256`）→
-代码内记录的 Snell / sing-box 钉死版本 SHA-256 表 → 结构校验（下载内容必须是合法的
-zip/gzip/xz 压缩包或 ELF 二进制，能挡镜像错误页但挡不住恶意替换）。
-不信任镜像时建议不要设置 `OC_GH_PROXY`。
+校验按优先级依次尝试：上游发布的校验文件（Xray `.dgst`、Hysteria2 `hashes.txt`、
+shadowsocks-rust `.sha256`）→ GitHub release API 的逐资产 `digest`（不发校验文件的项目也能覆盖）→
+代码内记录的 Snell / sing-box 钉死版本 SHA-256 表。
+**都拿不到哈希时区分对待**：直连 GitHub / 官方站只做结构校验（合法的 zip/gzip/xz 或 ELF，
+能挡镜像错误页）；一旦本次下载经第三方镜像，则默认**拒绝安装**——镜像可以替换二进制，
+没有哈希就没有依据。确认镜像可信时用 `OC_ALLOW_UNVERIFIED=1` 显式放行。
 
 **自动更新。** 每次运行都会从本仓库读取 `dist/oneclick.sh`，比较内嵌的 `OC_VERSION`，
 有新版本就原子替换自身并立即重启为新版本。任何失败（断网、镜像不可用、内容异常）都静默跳过，绝不阻塞菜单。
@@ -182,11 +183,15 @@ oneclick --version | --help
 ```
 
 按 16 个模块拼成 `dist/oneclick.sh`，并执行四项校验：`bash -n`、`shellcheck -S warning`、
-未定义函数扫描（只扫命令位，避免 jq 字段误报）、重复函数定义。改代码只改 `src/`，不要改 `dist/`。
+未定义函数扫描（只扫命令位，避免 jq 字段误报）、重复函数定义。产物先写入临时文件，四项检查
+全部通过后才原子替换 `dist/oneclick.sh`——构建失败不会留下半截或损坏的发布产物。
+改代码只改 `src/`，不要改 `dist/`。
+
+加 `--strict` 可让"未安装 shellcheck"从跳过变成构建失败（CI 使用该模式）。
 
 CI（`.github/workflows/build.yml`）在每次推送时执行同样的构建与单元测试、`--version` / `--help`
-冒烟测试，检查 `dist/oneclick.sh` 与 `src/` 产物一致，并检查改动 `README.md` 时
-`README.zh-CN.md` 是否同步更新——两份文档必须一起走。
+冒烟测试，检查 `dist/oneclick.sh` 与 `src/` 产物一致，对 `tools/` 下的辅助脚本做语法与 shellcheck
+检查，并校验 `README.md` 与 `README.zh-CN.md` 是否同步改动——**双向**检查，任一份单独改都会失败。
 
 运行时需要 **bash 4.0+**（用到 `declare -gA`、`${var,,}`）；macOS 自带的 bash 3.2 会直接退出并给出明确提示。
 所有受支持的 Linux 发行版都自带 bash 4 以上。

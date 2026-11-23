@@ -457,6 +457,29 @@ oc_self_update() {
         rm -f "$tmp"; return 0
     fi
     bash -n "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    # 完整性校验：这个文件会被 chmod 755 后以 root exec，光靠 bash -n 只挡住语法
+    # 错误，挡不住"内容被替换成另一个语法合法的脚本"。
+    #   1) 仓库若发布了 <url>.sha256 就严格比对（发布流程加上后自动生效）
+    #   2) 没有校验文件时做结构哨兵：必须是完整拼装产物且带自更新函数本体
+    local want_sha="" got_sha=""
+    want_sha="$(curl -fsSL --connect-timeout 3 --max-time 8 "$url.sha256" 2>/dev/null \
+        | awk '{print $1}' | head -1)"
+    if [[ -n "$want_sha" ]]; then
+        got_sha="$( (sha256sum "$tmp" 2>/dev/null || shasum -a 256 "$tmp" 2>/dev/null) | awk '{print $1}')"
+        if [[ "${got_sha,,}" != "${want_sha,,}" ]]; then
+            oc_warn "自更新校验失败（哈希不符），已放弃本次更新"
+            rm -f "$tmp"; return 0
+        fi
+    else
+        # 哨兵：产物必须以 OC_VERSION 声明开头段落、含协议注册表、含 99-menu 的
+        # main 调用；缺任何一项说明下载被截断或被换成了别的东西。
+        if ! grep -q '^OC_PROTOS=(' "$tmp" 2>/dev/null \
+            || ! grep -q '^main "\$@"$' "$tmp" 2>/dev/null \
+            || ! grep -q '^oc_self_update()' "$tmp" 2>/dev/null; then
+            oc_warn "自更新内容结构异常（缺少脚本标志段），已放弃本次更新"
+            rm -f "$tmp"; return 0
+        fi
+    fi
     # 目标：优先当前脚本文件；bash <(curl) 这类管道运行退回命令入口
     target=""
     if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then

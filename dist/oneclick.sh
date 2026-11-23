@@ -813,8 +813,10 @@ _dl_sha_from_hashlist() {
 #   成功输出小写 sha256；取不到或解析失败输出空串（不视为错误）
 dl_sidecar_sha() {
     local url="$1" asset="$2" style="$3" dir="$4"
-    local tmp sha="" try
-    tmp="$dir/.sidecar.$$"
+    local tmp sha=""
+    # 用 mktemp 而不是 .sidecar.$$：后者在并发/残留 PID 下会互相覆盖，
+    # 且失败路径一旦漏删就永久留垃圾文件在配置目录里。
+    tmp="$(mktemp "$dir/.sidecar.XXXXXX" 2>/dev/null)" || return 0
     case "$style" in
         dgst)
             if dl_fetch "$url.dgst" "$tmp" >/dev/null 2>&1; then
@@ -839,40 +841,69 @@ dl_sidecar_sha() {
     printf '%s' "${sha,,}"
 }
 
+# _dl_gh_repo_tag <url> -> "owner/repo<TAB>tag"，仅对 GitHub release 下载地址输出
+_dl_gh_repo_tag() {
+    local url="$1"
+    [[ "$url" =~ ^https://github\.com/([^/]+)/([^/]+)/releases/download/([^/]+)/ ]] || return 1
+    printf '%s/%s\t%s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+}
+
+# 下载校验失败时是否必须阻断。判据：这次下载可能走了第三方镜像
+# （镜像可替换二进制，又没有官方哈希可对），且用户没有显式放行。
+# 直连 GitHub / 官方站时不阻断——结构校验 + TLS 已是既有基线的合理水平。
+_dl_unverified_blocked() {
+    local url="$1"
+    [[ "${OC_ALLOW_UNVERIFIED:-0}" == "1" ]] && return 1
+    local m
+    m="$(dl_mirror_url "$url")"
+    [[ "$m" != "$url" ]]
+}
+
 # dl_verify_fetch <url> <out> <style> <asset-name>
-#   下载资产并尝试用上游 sidecar 校验；拿不到 sidecar 时只做结构校验。
+#   下载资产并校验。哈希来源按可靠性递降：
+#     1) 上游 sidecar 校验文件（dgst / hashes.txt / .sha256）
+#     2) GitHub release API 的 per-asset digest（无 sidecar 的项目也能覆盖）
+#     3) 都拿不到：直连时退化为结构校验；走了镜像则默认阻断（可被
+#        OC_ALLOW_UNVERIFIED=1 显式放行），避免镜像静默替换二进制。
 #   style: dgst | hashlist | plain（有上游校验文件）| none（该上游不发布校验文件）
 dl_verify_fetch() {
-    local url="$1" out="$2" style="$3" asset="$4" dir sha
+    local url="$1" out="$2" style="$3" asset="$4" dir sha rt
     dir="$(dirname -- "$out")"
     mkdir -p "$dir" 2>/dev/null || true
     if ! dl_fetch "$url" "$out"; then
         return 1
     fi
-    if [[ "$style" == "none" ]]; then
-        # 压缩包与裸二进制都要能过：按魔数判断，挡掉镜像返回的 HTML 错误页
-        if ! _dl_check_archive "$out"; then
-            oc_err "下载内容不是有效的压缩包/二进制（可能是镜像返回了错误页）：$(basename "$out")"
+    if [[ "$style" != "none" ]]; then
+        sha="$(dl_sidecar_sha "$url" "$asset" "$style" "$dir")"
+    fi
+    # sidecar 缺失/解析失败时回退 release API digest（sing-box、shadow-tls
+    # 这类不发校验文件的资产也能拿到官方哈希，不必只靠魔数）
+    if [[ -z "$sha" ]] && rt="$(_dl_gh_repo_tag "$url")"; then
+        sha="$(dl_asset_digest "${rt%%$'\t'*}" "${rt#*$'\t'}" "$asset")"
+    fi
+    if [[ -n "$sha" ]]; then
+        if ! dl_verify_sha "$out" "$sha"; then
             rm -f -- "$out"
             return 1
         fi
+        oc_ok "SHA256 校验通过：$(basename "$out")"
         return 0
     fi
-    sha="$(dl_sidecar_sha "$url" "$asset" "$style" "$dir")"
-    if [[ -z "$sha" ]]; then
-        oc_warn "取不到上游校验文件，仅做结构校验：$(basename "$out")"
-        if ! _dl_check_archive "$out"; then
-            oc_err "下载内容不是有效的压缩包/二进制：$(basename "$out")"
-            rm -f -- "$out"
-            return 1
-        fi
-        return 0
-    fi
-    if ! dl_verify_sha "$out" "$sha"; then
+    if _dl_unverified_blocked "$url"; then
+        oc_err "取不到任何官方哈希，且本次下载可能经第三方镜像：$(basename "$out")"
+        oc_err "  镜像可以替换二进制，无法校验就不能装。可选："
+        oc_err "  1) 清除镜像设置（settings.gh_proxy）后重试直连"
+        oc_err "  2) 确认镜像可信时设 OC_ALLOW_UNVERIFIED=1 放行"
         rm -f -- "$out"
         return 1
     fi
-    oc_ok "SHA256 校验通过：$(basename "$out")"
+    oc_warn "取不到官方哈希，仅做结构校验：$(basename "$out")"
+    if ! _dl_check_archive "$out"; then
+        oc_err "下载内容不是有效的压缩包/二进制（可能是镜像返回了错误页）：$(basename "$out")"
+        rm -f -- "$out"
+        return 1
+    fi
+    return 0
 }
 
 # dl_verify_sha <file> <expected-hex>；expected 为空表示无期望值，直接通过（调用方已做结构校验）
@@ -1466,6 +1497,18 @@ cert_unregister_user() {
 # 生成 acme.sh 的 reloadcmd：重启所有登记在案的 unit。
 # 用 restart 而非 reload：这些内核多数没有真正的 reload 语义，
 # restart 是唯一能确保读到新证书的方式。
+#
+# unit 名来自 db.json 的 cert_users_<domain>，而 db.json 可能被手工编辑或从
+# 备份恢复，所以这里必须按白名单过滤：这个名字会被拼进 crontab 以 root 执行的
+# 命令串，允许任意字符等于把 root 命令注入权交给任何能改 db 的人。
+_cert_unit_name_ok() {
+    local u="${1:-}"
+    # 登记的是 oc_unit_name 的输出，形态为 oneclick-<key>（不带 .service 后缀），
+    # 也允许显式带后缀的写法。字符集限定小写字母数字与 - _，杜绝空格/引号/分号
+    # 这类能把参数变成新命令的字符。
+    [[ "$u" =~ ^oneclick-[a-z0-9_-]+(\.service)?$ ]]
+}
+
 cert_reload_cmd() {
     local domain="$1" users u cmd=""
     users="$(db_get settings "cert_users_${domain}" "")"
@@ -1476,14 +1519,19 @@ cert_reload_cmd() {
     fi
     for u in ${users//,/ }; do
         [[ -n "$u" ]] || continue
-        cmd+="systemctl restart $u 2>/dev/null || true; "
+        if ! _cert_unit_name_ok "$u"; then
+            oc_warn "忽略非法证书使用者登记：$u（应为 oneclick-*.service）"
+            continue
+        fi
+        cmd+="systemctl restart '$u' 2>/dev/null || true; "
     done
+    [[ -n "$cmd" ]] || { printf 'true'; return 0; }
     printf '%s' "${cmd%; }"
 }
 
 # cert_acme <domain> <outdir>：acme.sh + HTTP-01（--standalone --httpport 80）
 cert_acme() {
-    local domain="$1" outdir="$2" acme crt key email issued=1 plog
+    local domain="$1" outdir="$2" acme crt key email issued=1 plog ascript
     if [[ -z "$domain" || -z "$outdir" ]]; then
         oc_err "cert_acme: 用法 cert_acme <domain> <outdir>"
         return 1
@@ -1513,18 +1561,31 @@ cert_acme() {
             || os_pkg_install socat cronie >/dev/null 2>&1 \
             || oc_warn "socat/cron 安装失败，ACME 可能不可用"
         email="admin@$domain"
-        # 安装脚本本身要从 GitHub 拉 master.tar.gz，偶发失败很常见：重试一次并保留日志
+        # 安装脚本本身要从 GitHub 拉 master.tar.gz，偶发失败很常见：重试一次并保留日志。
+        # 先落到文件再执行，不用 `curl | sh`：管道模式下 curl 中途断流，sh 会执行
+        # 半截脚本（前半段的 apt/rm 已经生效），且失败点无从复现。落盘后可先做
+        # 完整性判断，再交给 sh。
         plog="$(mktemp)" || plog="/tmp/oneclick-acme-install.$$.log"
+        ascript="$(mktemp)" || ascript=""
         local try rc=1
         for try in 1 2; do
-            if curl -fsSL --connect-timeout 10 --max-time 120 https://get.acme.sh 2>/dev/null \
-                    | sh -s "email=$email" >"$plog" 2>&1; then
+            if [[ -z "$ascript" ]]; then
+                oc_err "cert_acme: 无法创建临时文件"
+                rm -f -- "$plog"
+                return 1
+            fi
+            if curl -fsSL --connect-timeout 10 --max-time 120 https://get.acme.sh -o "$ascript" 2>/dev/null \
+                && [[ -s "$ascript" ]] \
+                && grep -q 'acme\.sh' "$ascript" 2>/dev/null \
+                && bash -n "$ascript" 2>/dev/null \
+                && sh "$ascript" "email=$email" >"$plog" 2>&1; then
                 rc=0
                 break
             fi
             oc_warn "acme.sh 安装失败（第 ${try} 次），10 秒后重试"
             ((try < 2)) && sleep 10
         done
+        rm -f -- "$ascript"
         if ((rc != 0)); then
             oc_err "cert_acme: acme.sh 安装失败（get.acme.sh 或 GitHub 下载不可达），最后几行日志："
             tail -5 "$plog" >&2
@@ -7024,6 +7085,29 @@ oc_self_update() {
         rm -f "$tmp"; return 0
     fi
     bash -n "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    # 完整性校验：这个文件会被 chmod 755 后以 root exec，光靠 bash -n 只挡住语法
+    # 错误，挡不住"内容被替换成另一个语法合法的脚本"。
+    #   1) 仓库若发布了 <url>.sha256 就严格比对（发布流程加上后自动生效）
+    #   2) 没有校验文件时做结构哨兵：必须是完整拼装产物且带自更新函数本体
+    local want_sha="" got_sha=""
+    want_sha="$(curl -fsSL --connect-timeout 3 --max-time 8 "$url.sha256" 2>/dev/null \
+        | awk '{print $1}' | head -1)"
+    if [[ -n "$want_sha" ]]; then
+        got_sha="$( (sha256sum "$tmp" 2>/dev/null || shasum -a 256 "$tmp" 2>/dev/null) | awk '{print $1}')"
+        if [[ "${got_sha,,}" != "${want_sha,,}" ]]; then
+            oc_warn "自更新校验失败（哈希不符），已放弃本次更新"
+            rm -f "$tmp"; return 0
+        fi
+    else
+        # 哨兵：产物必须以 OC_VERSION 声明开头段落、含协议注册表、含 99-menu 的
+        # main 调用；缺任何一项说明下载被截断或被换成了别的东西。
+        if ! grep -q '^OC_PROTOS=(' "$tmp" 2>/dev/null \
+            || ! grep -q '^main "\$@"$' "$tmp" 2>/dev/null \
+            || ! grep -q '^oc_self_update()' "$tmp" 2>/dev/null; then
+            oc_warn "自更新内容结构异常（缺少脚本标志段），已放弃本次更新"
+            rm -f "$tmp"; return 0
+        fi
+    fi
     # 目标：优先当前脚本文件；bash <(curl) 这类管道运行退回命令入口
     target=""
     if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then

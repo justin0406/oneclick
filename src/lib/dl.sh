@@ -177,8 +177,10 @@ _dl_sha_from_hashlist() {
 #   成功输出小写 sha256；取不到或解析失败输出空串（不视为错误）
 dl_sidecar_sha() {
     local url="$1" asset="$2" style="$3" dir="$4"
-    local tmp sha="" try
-    tmp="$dir/.sidecar.$$"
+    local tmp sha=""
+    # 用 mktemp 而不是 .sidecar.$$：后者在并发/残留 PID 下会互相覆盖，
+    # 且失败路径一旦漏删就永久留垃圾文件在配置目录里。
+    tmp="$(mktemp "$dir/.sidecar.XXXXXX" 2>/dev/null)" || return 0
     case "$style" in
         dgst)
             if dl_fetch "$url.dgst" "$tmp" >/dev/null 2>&1; then
@@ -203,40 +205,69 @@ dl_sidecar_sha() {
     printf '%s' "${sha,,}"
 }
 
+# _dl_gh_repo_tag <url> -> "owner/repo<TAB>tag"，仅对 GitHub release 下载地址输出
+_dl_gh_repo_tag() {
+    local url="$1"
+    [[ "$url" =~ ^https://github\.com/([^/]+)/([^/]+)/releases/download/([^/]+)/ ]] || return 1
+    printf '%s/%s\t%s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+}
+
+# 下载校验失败时是否必须阻断。判据：这次下载可能走了第三方镜像
+# （镜像可替换二进制，又没有官方哈希可对），且用户没有显式放行。
+# 直连 GitHub / 官方站时不阻断——结构校验 + TLS 已是既有基线的合理水平。
+_dl_unverified_blocked() {
+    local url="$1"
+    [[ "${OC_ALLOW_UNVERIFIED:-0}" == "1" ]] && return 1
+    local m
+    m="$(dl_mirror_url "$url")"
+    [[ "$m" != "$url" ]]
+}
+
 # dl_verify_fetch <url> <out> <style> <asset-name>
-#   下载资产并尝试用上游 sidecar 校验；拿不到 sidecar 时只做结构校验。
+#   下载资产并校验。哈希来源按可靠性递降：
+#     1) 上游 sidecar 校验文件（dgst / hashes.txt / .sha256）
+#     2) GitHub release API 的 per-asset digest（无 sidecar 的项目也能覆盖）
+#     3) 都拿不到：直连时退化为结构校验；走了镜像则默认阻断（可被
+#        OC_ALLOW_UNVERIFIED=1 显式放行），避免镜像静默替换二进制。
 #   style: dgst | hashlist | plain（有上游校验文件）| none（该上游不发布校验文件）
 dl_verify_fetch() {
-    local url="$1" out="$2" style="$3" asset="$4" dir sha
+    local url="$1" out="$2" style="$3" asset="$4" dir sha rt
     dir="$(dirname -- "$out")"
     mkdir -p "$dir" 2>/dev/null || true
     if ! dl_fetch "$url" "$out"; then
         return 1
     fi
-    if [[ "$style" == "none" ]]; then
-        # 压缩包与裸二进制都要能过：按魔数判断，挡掉镜像返回的 HTML 错误页
-        if ! _dl_check_archive "$out"; then
-            oc_err "下载内容不是有效的压缩包/二进制（可能是镜像返回了错误页）：$(basename "$out")"
+    if [[ "$style" != "none" ]]; then
+        sha="$(dl_sidecar_sha "$url" "$asset" "$style" "$dir")"
+    fi
+    # sidecar 缺失/解析失败时回退 release API digest（sing-box、shadow-tls
+    # 这类不发校验文件的资产也能拿到官方哈希，不必只靠魔数）
+    if [[ -z "$sha" ]] && rt="$(_dl_gh_repo_tag "$url")"; then
+        sha="$(dl_asset_digest "${rt%%$'\t'*}" "${rt#*$'\t'}" "$asset")"
+    fi
+    if [[ -n "$sha" ]]; then
+        if ! dl_verify_sha "$out" "$sha"; then
             rm -f -- "$out"
             return 1
         fi
+        oc_ok "SHA256 校验通过：$(basename "$out")"
         return 0
     fi
-    sha="$(dl_sidecar_sha "$url" "$asset" "$style" "$dir")"
-    if [[ -z "$sha" ]]; then
-        oc_warn "取不到上游校验文件，仅做结构校验：$(basename "$out")"
-        if ! _dl_check_archive "$out"; then
-            oc_err "下载内容不是有效的压缩包/二进制：$(basename "$out")"
-            rm -f -- "$out"
-            return 1
-        fi
-        return 0
-    fi
-    if ! dl_verify_sha "$out" "$sha"; then
+    if _dl_unverified_blocked "$url"; then
+        oc_err "取不到任何官方哈希，且本次下载可能经第三方镜像：$(basename "$out")"
+        oc_err "  镜像可以替换二进制，无法校验就不能装。可选："
+        oc_err "  1) 清除镜像设置（settings.gh_proxy）后重试直连"
+        oc_err "  2) 确认镜像可信时设 OC_ALLOW_UNVERIFIED=1 放行"
         rm -f -- "$out"
         return 1
     fi
-    oc_ok "SHA256 校验通过：$(basename "$out")"
+    oc_warn "取不到官方哈希，仅做结构校验：$(basename "$out")"
+    if ! _dl_check_archive "$out"; then
+        oc_err "下载内容不是有效的压缩包/二进制（可能是镜像返回了错误页）：$(basename "$out")"
+        rm -f -- "$out"
+        return 1
+    fi
+    return 0
 }
 
 # dl_verify_sha <file> <expected-hex>；expected 为空表示无期望值，直接通过（调用方已做结构校验）

@@ -824,8 +824,25 @@ EOS
     write_db '{"installed":[],"settings":{"cert_users_x.test.com":"oneclick-a,oneclick-b"}}'
     run cert_reload_cmd "x.test.com"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"systemctl restart oneclick-a"* ]] || { echo "缺 a：$output"; return 1; }
-    [[ "$output" == *"systemctl restart oneclick-b"* ]] || { echo "缺 b：$output"; return 1; }
+    [[ "$output" == *"systemctl restart 'oneclick-a'"* ]] || { echo "缺 a：$output"; return 1; }
+    [[ "$output" == *"systemctl restart 'oneclick-b'"* ]] || { echo "缺 b：$output"; return 1; }
+}
+
+@test "cert_reload_cmd_rejects_injected_unit_names" {
+    # db.json 可被手工编辑，unit 名会被拼进以 root 执行的 crontab 命令串。
+    # 非白名单名字必须丢弃，不能出现在输出里。
+    write_db '{"installed":[],"settings":{"cert_users_evil.test.com":"good-oneclick;rm -rf /tmp/x"}}'
+    run cert_reload_cmd "evil.test.com"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"rm -rf"* ]] || { echo "命令注入未被拦截：$output"; return 1; }
+    # 退化为无害命令：最后一行必须是 true（前面可能有 oc_warn 的提示行）
+    [ "$(printf '%s\n' "$output" | tail -1)" = "true" ] || { echo "无合法使用者应回退 true：$output"; return 1; }
+}
+
+@test "cert_reload_cmd_accepts_unit_with_service_suffix" {
+    write_db '{"installed":[],"settings":{"cert_users_y.test.com":"oneclick-hysteria2.service"}}'
+    run cert_reload_cmd "y.test.com"
+    [[ "$output" == *"oneclick-hysteria2.service"* ]] || { echo "带 .service 后缀应被接受：$output"; return 1; }
 }
 
 @test "cert_reload_cmd_empty_users_is_harmless" {
@@ -1077,4 +1094,68 @@ EOS
     # 两次 db_set：先写新端口，失败后回写旧端口
     grep -q '^snell|port|9090$' "$dbset"
     grep -q '^snell|port|8080$' "$dbset"
+}
+
+# ---------- 下载校验：不再 fail-open ----------
+
+@test "dl_verify_fetch_falls_back_to_release_digest" {
+    # sidecar 取不到时必须回退 GitHub release API digest，而不是直接放行
+    local body; body="$(declare -f dl_verify_fetch)"
+    [[ "$body" == *"dl_asset_digest"* ]] || { echo "未回退 digest"; return 1; }
+}
+
+@test "dl_verify_fetch_blocks_unverified_when_mirrored" {
+    # 走了镜像又拿不到任何哈希时必须阻断，并提示放行开关
+    local body; body="$(declare -f dl_verify_fetch)"
+    [[ "$body" == *"_dl_unverified_blocked"* ]] || { echo "缺镜像阻断分支"; return 1; }
+    local blk; blk="$(declare -f _dl_unverified_blocked)"
+    [[ "$blk" == *"OC_ALLOW_UNVERIFIED"* ]] || { echo "缺显式放行开关"; return 1; }
+}
+
+@test "dl_unverified_blocked_only_for_mirrored_urls" {
+    OC_ALLOW_UNVERIFIED=1
+    run _dl_unverified_blocked "https://github.com/a/b/releases/download/v1/x"
+    [ "$status" -ne 0 ] || { echo "显式放行后不该阻断"; return 1; }
+    # 未配置镜像时直连 URL 不阻断
+    unset OC_ALLOW_UNVERIFIED
+    db_get() { printf ''; }
+    run _dl_unverified_blocked "https://github.com/a/b/releases/download/v1/x"
+    [ "$status" -ne 0 ] || { echo "直连不该阻断"; return 1; }
+    # 配了镜像则阻断
+    OC_GH_PROXY="https://mirror.example"
+    run _dl_unverified_blocked "https://github.com/a/b/releases/download/v1/x"
+    [ "$status" -eq 0 ] || { echo "镜像场景应阻断"; return 1; }
+    OC_GH_PROXY=""
+}
+
+@test "dl_gh_repo_tag_parses_github_release_url" {
+    run _dl_gh_repo_tag "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64.tar.gz"
+    [ "$status" -eq 0 ]
+    [ "$output" = $'SagerNet/sing-box\tv1.14.4' ] || { echo "解析错误：$output"; return 1; }
+    run _dl_gh_repo_tag "https://dl.nssurge.com/snell/x.zip"
+    [ "$status" -ne 0 ] || { echo "非 GitHub 地址不该匹配"; return 1; }
+}
+
+@test "dl_sidecar_uses_mktemp_not_pid_suffix" {
+    local body; body="$(declare -f dl_sidecar_sha)"
+    [[ "$body" == *'mktemp "$dir/.sidecar.XXXXXX"'* ]] || { echo "未用 mktemp"; return 1; }
+    [[ "$body" != *'.sidecar.$$'* ]] || { echo "仍在用 PID 拼名"; return 1; }
+}
+
+# ---------- 自更新完整性 ----------
+
+@test "self_update_has_integrity_gate" {
+    local body; body="$(declare -f oc_self_update)"
+    # 用 grep -F 断言：函数体里的 '(' / '\$' 会让 [[ == *...* ]] 的模式匹配失真
+    grep -qF '.sha256' <<< "$body"     || { echo "缺 sha256 校验分支"; return 1; }
+    grep -qF 'OC_PROTOS=(' <<< "$body" || { echo "缺结构哨兵"; return 1; }
+    grep -qF 'main "\$@"' <<< "$body"  || { echo "缺 main 哨兵"; return 1; }
+}
+
+# ---------- acme.sh 安装不再 curl | sh ----------
+
+@test "acme_install_does_not_pipe_to_sh" {
+    local body; body="$(declare -f cert_acme)"
+    [[ "$body" != *'| sh -s'* ]] || { echo "仍在用 curl | sh"; return 1; }
+    [[ "$body" == *'bash -n "$ascript"'* ]] || { echo "缺下载后语法校验"; return 1; }
 }

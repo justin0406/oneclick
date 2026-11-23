@@ -22,7 +22,18 @@ jobs:
         run: sudo npm install -g bats
 
       - name: Build and validate
-        run: ./build.sh
+        run: ./build.sh --strict
+
+      - name: Lint auxiliary scripts
+        run: |
+          # tools/*.sh 不进 dist，但同样是用户直接 bash 执行的入口，
+          # 一并做语法与静态检查，避免它们成为无人看管的盲区。
+          for f in tools/*.sh; do
+            echo "-- $f"
+            bash -n "$f"
+            shellcheck -S warning -e SC1091,SC2034,SC2155 "$f"
+          done
+          echo "✓ 辅助脚本检查通过"
 
       # dist/oneclick.sh 是用户直接 curl 下载的产物，必须与 src/ 完全一致。
       # 改了 src 却忘了提交 dist，这一步会失败。
@@ -38,10 +49,10 @@ jobs:
       - name: Unit tests
         run: bats tests/
 
-      # 中英文 README 必须一起改：改了英文没改中文的提交直接拒绝。
+      # 中英文 README 必须一起走：任一份单独改都拒绝。
       # 这个遗漏已经发生过多次（v0.5.0 到 v0.9.0 的功能一个都没同步进中文版），
-      # 不能再靠人记，交给 CI。
-      - name: Check README zh-CN is kept in sync
+      # 不能再靠人记，交给 CI。双向检查——只改中文版同样会导致两份文档失配。
+      - name: Check README bilingual sync
         run: |
           if [[ "${{ github.event_name }}" = "pull_request" ]]; then
             FILES="$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")"
@@ -52,8 +63,15 @@ jobs:
           fi
           echo "变更文件："
           echo "$FILES" | sed 's/^/  /'
-          if grep -qx 'README\.md' <<< "$FILES" && ! grep -qx 'README\.zh-CN\.md' <<< "$FILES"; then
-            echo "::error::README.md 有改动但 README.zh-CN.md 没同步——中英文必须一起更新"
+          has_en=0; has_zh=0
+          grep -qx 'README\.md' <<< "$FILES" && has_en=1
+          grep -qx 'README\.zh-CN\.md' <<< "$FILES" && has_zh=1
+          if (( has_en != has_zh )); then
+            if (( has_en )); then
+              echo "::error::README.md 有改动但 README.zh-CN.md 没同步——中英文必须一起更新"
+            else
+              echo "::error::README.zh-CN.md 有改动但 README.md 没同步——中英文必须一起更新"
+            fi
             exit 1
           fi
           echo "✓ README 中英文同步检查通过"
