@@ -1159,3 +1159,38 @@ EOS
     [[ "$body" != *'| sh -s'* ]] || { echo "仍在用 curl | sh"; return 1; }
     [[ "$body" == *'bash -n "$ascript"'* ]] || { echo "缺下载后语法校验"; return 1; }
 }
+
+# ---------- REALITY ML-KEM：Xray >= 26.9.9 服务端强制要求 ----------
+# XTLS/REALITY 8cdf7bf：没有 X25519MLKEM768 key share 的 ClientHello 一律拒绝。
+# mihomo 默认剥掉 ML-KEM，必须显式开 support-x25519mlkem768。
+
+@test "clash_vless_reality_enables_mlkem" {
+    write_db '{"installed":["vless_reality"],"settings":{"ip":"1.2.3.4"},
+      "vless_reality":{"port":"443","uuid":"11111111-2222-3333-4444-555555555555",
+      "server_name":"www.microsoft.com","short_id":"5ae06551",
+      "public_key":"qxnmPvI1Ku9BIZhNhZZS14F-jfrdz_URYf80AoruNEA"}}'
+    run proto_vless_reality_clash
+    [ "$status" -eq 0 ] || { echo "生成失败"; return 1; }
+    grep -qx '      support-x25519mlkem768: true' <<< "$output" || {
+        echo "缺 ML-KEM 开关或缩进不在 reality-opts 下：$output"; return 1; }
+    # 开关必须紧跟在 reality-opts 段内（在 client-fingerprint 之前）
+    local mlk cfp
+    mlk=$(grep -n 'support-x25519mlkem768' <<< "$output" | cut -d: -f1)
+    cfp=$(grep -n 'client-fingerprint' <<< "$output" | cut -d: -f1)
+    [ "$mlk" -lt "$cfp" ] || { echo "开关位置在 client-fingerprint 之后"; return 1; }
+}
+
+@test "vless_share_link_carries_mlkem_param" {
+    write_db '{"installed":["vless_reality"],"settings":{"ip":"1.2.3.4"},
+      "vless_reality":{"port":"443","uuid":"11111111-2222-3333-4444-555555555555",
+      "server_name":"www.microsoft.com","short_id":"5ae06551",
+      "public_key":"qxnmPvI1Ku9BIZhNhZZS14F-jfrdz_URYf80AoruNEA"}}'
+    run proto_vless_reality_link
+    [ "$status" -eq 0 ] || { echo "生成失败"; return 1; }
+    [[ "$output" == *"support-x25519mlkem768=true"* ]] || {
+        echo "分享链接缺 ML-KEM 参数：$output"; return 1; }
+    # 参数必须落在 query 段，不是 fragment
+    local query="${output#*\?}"; query="${query%%#*}"
+    [[ "&$query&" == *"&support-x25519mlkem768=true&"* ]] || {
+        echo "参数不在 query 段：$query"; return 1; }
+}

@@ -39,7 +39,7 @@ sudo oc --link snell --format surge
 
 | Protocol | Server | Port | Certificate | Notes |
 |---|---|---|---|---|
-| VLESS-Reality | xray-core | 443 by default (or random) | not needed | REALITY + x25519, strongest against active probing; good default |
+| VLESS-Reality | xray-core | 443 by default (or random) | not needed | REALITY + x25519, strongest against active probing; good default. Xray ≥26.9.9 requires ML-KEM in the ClientHello — see the note below |
 | Hysteria2 | hysteria | random high UDP | self-signed / ACME / existing | QUIC, good on lossy links; salamander obfuscation and port hopping optional |
 | Snell v5 / v6 | snell-server 5.0.1 / 6.0.0 | random high | not needed | single port, PSK auth, native Surge support; v5 is QUIC (TCP+UDP) and the only option on armv7l |
 | SS-Rust | ssserver | random high TCP + UDP | only for ShadowTLS | SS2022 by default; ShadowTLS v3 (strict) available as an opt-in disguise, off by default. Client must support v3 (e.g. mihomo / Clash Meta) |
@@ -52,6 +52,18 @@ camouflage) and only falls back to a random high port on N. Pass `--port` to ove
 SS-Rust always installs with SS2022 (`2022-blake3-aes-128-gcm`) and never asks — there is no
 server-side signal for client capability. For clients without SS2022, pass
 `--method chacha20-ietf-poly1305` (or `aes-256-gcm`).
+
+> **REALITY and ML-KEM (Xray ≥26.9.9).** Since Xray 26.9.9 the REALITY server rejects any
+> ClientHello that does not carry an `X25519MLKEM768` key share, so the client side matters:
+>
+> - **mihomo / Clash Meta:** the generated Clash snippet sets `support-x25519mlkem768: true` under
+>   `reality-opts`, and the share link carries `support-x25519mlkem768=true`. Requires mihomo
+>   v1.19.31+; older versions ignore the field (and will fail against a ≥26.9.9 server).
+> - **Surge:** handles this automatically — per the official manual, servers running Xray 26.9.9 or
+>   later always receive the unmodified ClientHello. Nothing to configure.
+> - **sing-box:** still cannot connect (SagerNet/sing-box#4520, open). The sing-box snippet is still
+>   emitted in the standard shape and will work once upstream fixes it; use Surge/Loon/mihomo for now.
+> - **Loon:** not verified either way — check on your own build.
 
 > **Why AnyTLS runs on sing-box instead of anytls-go:** the anytls-go server generates its TLS
 > certificate in-process — a one-hour RSA key with no SAN — so it can never use a certificate the

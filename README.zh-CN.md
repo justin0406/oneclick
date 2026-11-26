@@ -37,7 +37,7 @@ sudo oc --link snell --format surge
 
 | 协议 | 服务端 | 端口 | 证书 | 说明 |
 |---|---|---|---|---|
-| VLESS-Reality | xray-core | 默认 443（可选随机） | 不需要 | REALITY + x25519，抗主动探测最强，建议作为主协议 |
+| VLESS-Reality | xray-core | 默认 443（可选随机） | 不需要 | REALITY + x25519，抗主动探测最强，建议作为主协议。Xray ≥26.9.9 要求客户端带 ML-KEM，见下方说明 |
 | Hysteria2 | hysteria | 随机高位 UDP | 自签 / ACME / 已有 | QUIC，高丢包网络表现好，支持 salamander 混淆与端口跳跃 |
 | Snell v5 / v6 | snell-server 5.0.1 / 6.0.0 | 随机高位 | 不需要 | 单端口、PSK 认证，Surge 生态原生支持；v5 是 QUIC（TCP+UDP），且是 armv7l 上的唯一选择 |
 | SS-Rust | ssserver | 随机高位 TCP + UDP | 仅 ShadowTLS 需要 | 默认 SS2022；ShadowTLS v3（strict）伪装可选、默认关闭，客户端需支持 v3（如 mihomo / Clash Meta） |
@@ -49,6 +49,18 @@ VLESS-Reality 例外：安装时询问是否用 443（Y，伪装最优），选 
 
 SS-Rust 固定使用 SS2022（`2022-blake3-aes-128-gcm`），安装时不再询问——服务端没有任何
 信号能判断客户端能力。老客户端请加 `--method chacha20-ietf-poly1305`（或 `aes-256-gcm`）。
+
+> **REALITY 与 ML-KEM（Xray ≥26.9.9）。** 自 Xray 26.9.9 起，REALITY 服务端会拒绝任何
+> 未携带 `X25519MLKEM768` key share 的 ClientHello，因此客户端侧很关键：
+>
+> - **mihomo / Clash Meta：** 生成的 Clash 片段在 `reality-opts` 下带
+>   `support-x25519mlkem768: true`，分享链接带 `support-x25519mlkem768=true`。需要
+>   mihomo v1.19.31+；更老的版本会忽略该字段（连 ≥26.9.9 的服务端会失败）。
+> - **Surge：** 自动处理——官方手册明确说明，Xray 26.9.9 及以上的服务端始终收到未修改的
+>   ClientHello。无需任何配置。
+> - **sing-box：** 目前连不上（SagerNet/sing-box#4520，仍 open）。sing-box 片段仍按标准格式
+>   输出，上游修复后即可用；现阶段请改用 Surge / Loon / mihomo。
+> - **Loon：** 尚未验证，请以你自己的版本实测为准。
 
 > AnyTLS 用 sing-box 而非 anytls-go：后者服务端的 TLS 是进程内生成的 1 小时临时证书（无 SAN），
 > 无法使用脚本签发的证书；sing-box 的 anytls inbound 支持 `certificate_path` / `key_path`。

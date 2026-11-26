@@ -3112,7 +3112,10 @@ proto_vless_reality_link() {
         return 1
     }
     name="${OC_PROTO_TITLE[$key]:-VLESS-Reality}"
-    printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp&flow=xtls-rprx-vision#%s\n' \
+    # support-x25519mlkem768=true：Xray >= 26.9.9 的 REALITY 服务端强制要求
+    # ClientHello 带 X25519MLKEM768；mihomo v1.19.31+ 从链接读取该开关，
+    # 未识别该参数的老客户端会直接忽略，不影响兼容性。
+    printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&support-x25519mlkem768=true&type=tcp&flow=xtls-rprx-vision#%s\n' \
         "$uuid" "$ip" "$port" "$sni" "$pub" "$sid" "$name"
 }
 
@@ -3206,6 +3209,10 @@ proto_vless_reality_clash() {
     printf '    reality-opts:\n'
     printf '      public-key: %s\n' "$pub"
     printf '      short-id: %s\n' "$sid"
+    # mihomo 默认会把 uTLS 的 ML-KEM 密钥共享剥掉，而 Xray >= 26.9.9 的 REALITY
+    # 服务端强制要求 ClientHello 带 X25519MLKEM768（XTLS/REALITY 8cdf7bf），
+    # 不开这个开关就是握手被拒。mihomo v1.19.31+ 才认该字段，旧版忽略。
+    printf '      support-x25519mlkem768: true\n'
     printf '    client-fingerprint: chrome\n'
 }
 
@@ -3247,6 +3254,10 @@ proto_vless_reality_singbox() {
     pub="$(db_get "$key" public_key "")"
     name="${OC_PROTO_TITLE[$key]:-VLESS-Reality}"
     [[ -z "$ip" ]] && return 1
+    # sing-box 的 uTLS 目前不发 X25519MLKEM768 密钥共享，而 Xray >= 26.9.9 的
+    # REALITY 服务端会拒绝这类 ClientHello（SagerNet/sing-box#4520，尚未修复）。
+    # 片段仍按标准格式输出（等上游修好后即可用），但必须让用户知道现状。
+    oc_warn "sing-box 客户端暂不支持 Xray ≥26.9.9 的 REALITY（上游 issue #4520）；此节点请用 Surge/Loon/mihomo 连接" >&2
     jq -c -n \
         --arg tag "$name" \
         --arg server "$ip" \

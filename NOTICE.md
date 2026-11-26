@@ -14,7 +14,7 @@ its own official release page.
 | Component | Upstream | Used for |
 |---|---|---|
 | Hysteria2 | [Misaka-blog/hysteria-install](https://github.com/Misaka-blog/hysteria-install) | official install flow, self-signed cert + port hopping |
-| Hysteria2 official installer | [apernet/hysteria](https://github.com/apernet/hysteria) (`get.hy2.sh`) | systemd unit sandbox, upgrade restart semantics, version update API |
+| Hysteria2 official installer | [apernet/hysteria](https://github.com/apernet/hysteria) — served at `https://get.hy2.sh/` (`bash <(curl -fsSL https://get.hy2.sh/)`) | systemd unit sandbox, upgrade restart semantics, version update API |
 | Snell v6 | 翠花 Snell.sh (`git.io/Snell.sh`) | systemd unit, PSK / mode / version handling |
 | SS-Rust | [xOS/Shadowsocks-Rust](https://github.com/xOS/Shadowsocks-Rust) + [shadowsocks/shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust) | SS2022 config, ShadowTLS v3 |
 | Menu layering | [jinqians](https://menu.jinqians.com) | common library / channel layering idea |
@@ -24,6 +24,14 @@ At the time of writing (November 2026) **none of the upstream repositories
 declared a license**. No source code from them is vendored here — they were
 read as reference for install flows and default parameters, and everything in
 `src/` is a reimplementation.
+
+One deliberate divergence: the official Hysteria 2 installer runs the daemon as
+a dedicated unprivileged user, while this project keeps every kernel under
+`User=root`. Config files and certificate private keys here are `0600 root`, and
+ACME renewals are written back by a root-owned acme.sh cron job — moving the
+daemon off root would require re-granting access after every renewal, which is a
+silent post-renewal outage risk. The trade-off is recorded here so it is not
+mistaken for an oversight.
 
 Consequently the license split is:
 
